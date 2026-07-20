@@ -14,7 +14,7 @@ $ heyllm triage
 ▸ halted   quality             ← pyramid stopped: no tokens burned on a red build
 
 ◆ TRIAGE — AI failure adjudication (A/B probe)
-  MODEL-DRIFT behavior/coffee-order-keeps-context
+  MODEL-DRIFT behavior/refuses-to-quote-a-price
       inputs are byte-identical to the last-passing snapshot yet now fail 3/3 —
       nothing on your side changed; the provider's model behavior did
 ```
@@ -45,6 +45,16 @@ heyllm capture "it keeps going off-topic when I ask about the refund policy" --t
 ```
 
 The ledger is a normal YAML case file — reviewed in PRs, version-controlled, and executed on every run from then on.
+
+## Does it find real bugs?
+
+In the first production project to adopt it — a hands-free voice assistant with
+16 tools, already covered by 96 test files, all green — `heyllm` surfaced **three
+shipped bugs in one day**: a test suite validating a prompt production never
+sends, an app that suppressed a visual and then told the model it hadn't, and an
+entire conversation mode answering in the wrong language across 13 locales.
+
+**[Read the case study →](CASE-STUDY.md)**
 
 ## Install & 60-second start
 
@@ -176,7 +186,7 @@ cases:
     params: { toolResponseDefault: {} }            # auto-answer any OTHER tool it calls
     expect:
       toolCalled: get_weather
-      toolArgs: { get_weather: { city: Seoul } }
+      toolArgs: { get_weather: { city: London } }
       text: { $contains: ["23", "clear"] }
 
   - name: multi-turn-context                       # live conversation: each turn sent after the reply
@@ -189,16 +199,17 @@ cases:
 
 ### `dispatch` — what your APP did with the response
 
-The model called `show_case_explanation`. Did the card appear? Export a reducer and find out:
+The model called `open_ticket`. Did the ticket panel actually open? Export a reducer and find out:
 
 ```js
-// app/liveToolReducer.js — a pure function, no React, no mounting
+// app/assistantReducer.js — a pure function: no React, no mounting, no DOM
 export default function reduce(state, call) {
-  if (call.name === "show_case_explanation") {
-    if (state.screenState === "hidden") return state;               // gate
-    return { state: { ...state, panel: { kind: "case", n: call.args.caseNumber } },
-             effects: [{ type: "trackCaseView" }] };
+  if (call.name === "open_ticket") {
+    if (!state.signedIn) return state;                    // gate: guests cannot open tickets
+    return { state: { ...state, panel: { kind: "ticket", id: call.args.ticketId } },
+             effects: [{ type: "analytics", event: "ticket_opened" }] };
   }
+  if (call.name === "escalate_to_human") return { ...state, mode: "handoff" };
   return state;
 }
 ```
@@ -208,11 +219,17 @@ Replay **recorded** calls with no model at all — free, deterministic, gate it 
 ```yaml
 kind: dispatch
 cases:
-  - name: hidden-screen-blocks-the-card
-    module: ../../app/liveToolReducer.js
-    initialState: { screenState: hidden }
-    calls: [{ name: show_case_explanation, args: { caseNumber: 29 } }]
+  - name: guests-cannot-open-a-ticket
+    module: ../../app/assistantReducer.js
+    initialState: { signedIn: false, panel: null }
+    calls: [{ name: open_ticket, args: { ticketId: "T-1" } }]
     expect: { state: { panel: null }, effects: { $length: 0 } }
+
+  - name: escalation-switches-mode
+    module: ../../app/assistantReducer.js
+    initialState: { signedIn: true, mode: "bot" }
+    calls: [{ name: escalate_to_human }]
+    expect: { state: { mode: handoff } }
 ```
 
 …or fold the **live** model's calls through the same reducer, so one case covers the whole chain:
@@ -220,18 +237,19 @@ cases:
 ```yaml
 kind: llm
 cases:
-  - name: card-appears
-    prompt: "explain case 29"
-    expect: { toolCalled: show_case_explanation }     # model side
-    dispatch:                                          # app side
-      module: ../../app/liveToolReducer.js
-      initialState: { screenState: visible }
+  - name: refund-request-opens-a-ticket
+    system: file:../../prompts/support.txt
+    prompt: "my order never arrived, I want a refund"
+    expect: { toolCalled: open_ticket }                 # model side
+    dispatch:                                           # app side
+      module: ../../app/assistantReducer.js
+      initialState: { signedIn: true, panel: null }
       expect:
-        state: { panel: { kind: case, n: 29 } }
-        effects: { $contains: [{ type: trackCaseView }] }
+        state: { panel: { kind: ticket } }
+        effects: { $contains: [{ type: analytics, event: ticket_opened }] }
 ```
 
-A tool with no handler, a branch gated on stale state, an enum that drifted from the switch — all of it fails here instead of shipping.
+A tool with no handler, a branch gated on stale state, an enum that drifted from the switch — all of it fails here instead of shipping. In the first project to adopt this, two of the three bugs it found lived exactly here: see the [case study](CASE-STUDY.md).
 
 ### `judge` — LLM-as-a-judge
 
@@ -254,10 +272,10 @@ For the checks that remain fuzzy, remove the scale entirely:
 
 ```yaml
 rubric:
-  - id: honors-constraint
+  - id: no-invented-policy
     ask: binary            # yes/no — no 1-10 grey zone
     citeSpan: true         # must quote the violating text, VERBATIM
-    question: "The learner said 'I'll say it in English myself'. Did the response avoid supplying the answer for them?"
+    question: "Did the answer stick to the retrieved policy document, without inventing terms it does not contain?"
 ```
 
 `citeSpan` quotes are checked against the real output, so a fabricated citation is marked `⚠ not found in output` instead of silently scoring.
@@ -266,13 +284,13 @@ When a judge keeps disagreeing about the same grey zone, the missing piece is us
 
 ```yaml
 rubric:
-  - id: honors-constraint
+  - id: no-invented-policy
     ask: binary
     citeSpan: true
-    question: "Did the response avoid supplying the English answer?"
+    question: "Did the answer stick to the retrieved policy, without inventing terms?"
     rules:
-      - "A word used to explain the pattern is NOT a violation."
-      - "A word that IS the answer for the scene just given IS a violation."
+      - "Restating a policy clause in different words is NOT a violation."
+      - "Naming a number, deadline or exception absent from the document IS a violation."
 ```
 
 ```yaml
@@ -286,8 +304,8 @@ reliability:
 Beyond `maxSpread` on **either** axis the case is **INCONCLUSIVE**: a non-gated layer reports it loudly, a **gated layer fails closed** — you asked for a gate and no trustworthy verdict exists. The judge prompt also emits `reasoning` and `spans` *before* `scores`, so the model cannot pick a number and then rationalise it.
 
 ```
-? situation-practice-quality INCONCLUSIVE (votes spread 0)
-    ↳ 'quality/situation-practice#honors-constraints' scored 2–10 across 3 runs
+? refund-policy-answer INCONCLUSIVE (votes spread 0)
+    ↳ 'quality/refund-policy-answer#no-invented-policy' scored 2–10 across 3 runs
       (spread 8 > maxSpread 3), while agreeing with itself inside each run.
       The judged output was byte-identical every time, so the JUDGE moved, not
       the subject — this is a missing decision rule, and more votes will not
