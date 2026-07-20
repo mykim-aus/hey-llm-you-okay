@@ -1,5 +1,5 @@
 /**
- * Baseline store — `.haechi/baseline.json`, committed to git.
+ * Baseline store — `.heyllm/baseline.json`, committed to git.
  *
  * Two things live here, keyed by "<layer>/<case>":
  *   scores    — last accepted judge medians (score-regression detection)
@@ -14,7 +14,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { BaselineFile, ResolvedLlmInputs, Scale, SnapshotEntry } from "./types.js";
 
-export const BASELINE_RELPATH = ".haechi/baseline.json";
+export const BASELINE_RELPATH = ".heyllm/baseline.json";
 
 export const caseKey = (layerName: string, caseName: string) => `${layerName}/${caseName}`;
 

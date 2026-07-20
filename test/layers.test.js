@@ -20,8 +20,8 @@ test.after(async () => {
 });
 
 async function scaffold(configYaml, files = {}) {
-  const dir = await mkdtemp(path.join(tmpdir(), "haechi-"));
-  await writeFile(path.join(dir, "haechi.yaml"), configYaml.replaceAll("{{MOCK}}", mock.base));
+  const dir = await mkdtemp(path.join(tmpdir(), "heyllm-"));
+  await writeFile(path.join(dir, "heyllm.yaml"), configYaml.replaceAll("{{MOCK}}", mock.base));
   for (const [rel, content] of Object.entries(files)) {
     const p = path.join(dir, rel);
     await mkdir(path.dirname(p), { recursive: true });
@@ -30,7 +30,7 @@ async function scaffold(configYaml, files = {}) {
   return dir;
 }
 
-const run = async (dir, opts = {}) => runSuite(await loadConfig(path.join(dir, "haechi.yaml")), opts);
+const run = async (dir, opts = {}) => runSuite(await loadConfig(path.join(dir, "heyllm.yaml")), opts);
 
 const caseOf = (summary, layerName, caseName) =>
   summary.layers.find((l) => l.name === layerName)?.cases.find((c) => c.name === caseName);
@@ -62,7 +62,7 @@ layers:
   - name: e
     kind: exec
     cases:
-      - { name: ok, command: "echo haechi-runs", expect: { stdout: "haechi-runs" } }
+      - { name: ok, command: "echo heyllm-runs", expect: { stdout: "heyllm-runs" } }
       - { name: fails, command: "exit 3" }
 `);
   const s = await run(dir);
@@ -80,15 +80,15 @@ layers:
     kind: http
     cases:
       - name: wrong-password
-        request: { method: POST, url: "{{MOCK}}/api/login", json: { user: haechi, pass: wrong } }
+        request: { method: POST, url: "{{MOCK}}/api/login", json: { user: heyllm, pass: wrong } }
         expect: { status: 401, json: { error: login_required } }
       - name: login
-        request: { method: POST, url: "{{MOCK}}/api/login", json: { user: haechi, pass: beast } }
+        request: { method: POST, url: "{{MOCK}}/api/login", json: { user: heyllm, pass: beast } }
         expect: { status: 200, jsonPath: { token: { $pattern: "^tok-" } } }
         save: { token: json.token }
       - name: me-authorized
         request: { url: "{{MOCK}}/api/me", headers: { authorization: "Bearer {{token}}" } }
-        expect: { status: 200, json: { email: haechi@example.com } }
+        expect: { status: 200, json: { email: heyllm@example.com } }
 `);
   const s = await run(dir);
   for (const name of ["wrong-password", "login", "me-authorized"])
@@ -261,7 +261,7 @@ test("layer env guard: missing env fails gated layer, skips non-gated", async ()
   const dir = await scaffold(`
 providers: {}
 layers:
-  - { name: needs-env, kind: exec, env: [HAECHI_NO_SUCH_ENV_VAR], cases: [{ name: x, command: "true" }] }
+  - { name: needs-env, kind: exec, env: [HEYLLM_NO_SUCH_ENV_VAR], cases: [{ name: x, command: "true" }] }
 `);
   const s = await run(dir);
   assert.equal(s.ok, false);

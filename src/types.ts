@@ -1,5 +1,5 @@
 /**
- * Core shared types for Haechi.
+ * Core shared types for HeyLLM.
  *
  * YAML-shaped data (cases, expects) is intentionally loose (`Record<string,
  * unknown>` / `any` at the edges) — the config validator narrows it at load
@@ -168,7 +168,7 @@ export interface Settings {
   envFile?: string | string[];
 }
 
-export interface HaechiConfig {
+export interface HeyLLMConfig {
   file: string;
   baseDir: string;
   version: 1;
@@ -233,11 +233,11 @@ export interface CaseResult {
 export interface CaseCtx {
   layer: LayerConfig;
   providers: Record<string, Provider>;
-  /** directory of the case's YAML file (or of haechi.yaml for inline cases) */
+  /** directory of the case's YAML file (or of heyllm.yaml for inline cases) */
   baseDir: string;
   lookup: (name: string) => unknown;
   saved: Record<string, unknown>;
-  config: HaechiConfig;
+  config: HeyLLMConfig;
 }
 
 export interface CaseRunRecord {

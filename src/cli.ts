@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 /**
- * haechi — 해치(獬豸), the justice beast for your LLM pipelines.
+ * heyllm — hey LLM, you okay? Ask your pipeline on every commit.
  *
- *   haechi run        [--config haechi.yaml] [--profile ci] [--only a,b]
+ *   heyllm run        [--config heyllm.yaml] [--profile ci] [--only a,b]
  *                     [--grep re] [--tags t1,t2] [--triage] [--update-baseline]
  *                     [--keep-going] [--report json|junit] [--report-file f]
  *                     [--verbose]
- *   haechi triage     (run, then A/B-probe every AI failure; exit code from run)
- *   haechi validate   (config + case lint, no execution)
- *   haechi capture "input" [--name n] [--tags a,b] [--note ...] [--layer l]
- *   haechi init       (scaffold haechi.yaml + example tests)
+ *   heyllm triage     (run, then A/B-probe every AI failure; exit code from run)
+ *   heyllm validate   (config + case lint, no execution)
+ *   heyllm capture "input" [--name n] [--tags a,b] [--note ...] [--layer l]
+ *   heyllm init       (scaffold heyllm.yaml + example tests)
  *
  * Exit codes: 0 pass · 1 gated failure · 2 usage/config error
  */
@@ -90,7 +90,7 @@ async function cmdRun(argv: Argv, forceTriage = false): Promise<number> {
     profile: argv.flags.profile as string,
   });
   console.log(
-    c.bold(`◆ HAECHI`) +
+    c.bold(`◆ HEYLLM`) +
       c.dim(` — ${config.layers.length} layers${config.profile ? ` · profile: ${config.profile}` : ""}`)
   );
   const summary = await runSuite(config, {
@@ -108,7 +108,7 @@ async function cmdRun(argv: Argv, forceTriage = false): Promise<number> {
   if (kind) {
     const file =
       (argv.flags["report-file"] as string) ||
-      (kind === "junit" ? "haechi-report.xml" : "haechi-report.json");
+      (kind === "junit" ? "heyllm-report.xml" : "heyllm-report.json");
     if (kind === "junit") await writeJunitReport(summary, file);
     else if (kind === "json") await writeJsonReport(summary, file);
     else {
@@ -145,7 +145,7 @@ async function cmdValidate(argv: Argv): Promise<number> {
 async function cmdCapture(argv: Argv): Promise<number> {
   const input = argv.pos[0];
   if (!input) {
-    console.error('usage: haechi capture "the input that misbehaved" [--name n] [--tags a,b] [--note ...] [--layer l]');
+    console.error('usage: heyllm capture "the input that misbehaved" [--name n] [--tags a,b] [--note ...] [--layer l]');
     return 2;
   }
   const config = await loadConfig(argv.flags.config as string, {
@@ -161,7 +161,7 @@ async function cmdCapture(argv: Argv): Promise<number> {
     `${c.green("✓")} captured as ${c.bold(res.caseName)} → ${res.file} ${c.dim(`(layer: ${res.layer})`)}`
   );
   if (res.reachable) {
-    console.log(c.dim("  add your expectations (expect:/rubric:) and commit — it runs on every `haechi run` from now on."));
+    console.log(c.dim("  add your expectations (expect:/rubric:) and commit — it runs on every `heyllm run` from now on."));
   } else {
     console.log(
       `${c.yellow("  ⚠ this file is NOT matched by layer '" + res.layer + "' include:")} ${res.patterns.join(", ") || "(none)"}`
@@ -171,7 +171,7 @@ async function cmdCapture(argv: Argv): Promise<number> {
   return 0;
 }
 
-const INIT_CONFIG = `# haechi.yaml — 해치(獬豸): LLM test pyramid for CI/CD
+const INIT_CONFIG = `# heyllm.yaml — hey LLM, you okay? LLM test pyramid for CI/CD
 # Layers run top-to-bottom (cheap → expensive). A failing GATED layer halts
 # the pyramid so later (paid) layers never burn tokens on a broken build.
 version: 1
@@ -188,7 +188,7 @@ providers:
     model: llama3.1:8b
 
 profiles:                       # provider swaps per environment
-  ci:                           # haechi run --profile ci  (or HAECHI_PROFILE=ci)
+  ci:                           # heyllm run --profile ci  (or HEYLLM_PROFILE=ci)
     providers:
       subject: { kind: gemini, baseUrl: null, model: gemini-2.5-flash, apiKeyEnv: GEMINI_API_KEY }
       judge:   { kind: anthropic, baseUrl: null, model: claude-sonnet-5, apiKeyEnv: ANTHROPIC_API_KEY }
@@ -260,7 +260,7 @@ const INIT_PROMPT = `You are a helpful, safe assistant. Refuse harmful requests 
 
 async function cmdInit(): Promise<number> {
   const writes: Array<[string, string]> = [
-    ["haechi.yaml", INIT_CONFIG],
+    ["heyllm.yaml", INIT_CONFIG],
     ["tests/static/sanity.yaml", INIT_STATIC],
     ["tests/behavior/basics.yaml", INIT_BEHAVIOR],
     ["tests/judge/safety.yaml", INIT_JUDGE],
@@ -276,23 +276,23 @@ async function cmdInit(): Promise<number> {
       console.log(`${c.yellow("○")} ${rel} exists — skipped`);
     }
   }
-  console.log(`\nnext: ${c.bold("haechi validate")} then ${c.bold("haechi run")}`);
+  console.log(`\nnext: ${c.bold("heyllm validate")} then ${c.bold("heyllm run")}`);
   return 0;
 }
 
 function help(): number {
-  console.log(`${c.bold("haechi")} — 해치(獬豸), the justice beast for your LLM pipelines
+  console.log(`${c.bold("heyllm")} — hey LLM, you okay? Ask your pipeline on every commit
 
 commands:
   run        run the layer pyramid (cheap → expensive, gated halt)
   triage     run, then A/B-probe every AI failure (flaky | your-change | model-drift)
   validate   lint config + case files without executing
   capture    append a real-world input to the golden corpus ledger
-  init       scaffold haechi.yaml + example tests
+  init       scaffold heyllm.yaml + example tests
 
 common flags:
-  --config <file>      default: ./haechi.yaml
-  --profile <name>     provider swap (or HAECHI_PROFILE env)
+  --config <file>      default: ./heyllm.yaml
+  --profile <name>     provider swap (or HEYLLM_PROFILE env)
   --only a,b           run only these layers
   --grep <regex>       filter cases by name
   --tags a,b           filter cases by tags
@@ -313,7 +313,7 @@ export async function main(argv: string[]): Promise<number> {
     return 2;
   }
   if (parsed.flags.version) {
-    console.log("haechi 0.1.0");
+    console.log("heyllm 0.1.0");
     return 0;
   }
   if (parsed.flags["no-color"]) process.env.NO_COLOR = "1";
@@ -330,7 +330,7 @@ export async function main(argv: string[]): Promise<number> {
       case "init":
         return await cmdInit();
       case "version":
-        console.log("haechi 0.1.0");
+        console.log("heyllm 0.1.0");
         return 0;
       default:
         return help();

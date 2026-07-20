@@ -1,8 +1,8 @@
 node_modules/
 dist/
-haechi-report.json
-haechi-report.xml
-examples/quickstart/.haechi/
+heyllm-report.json
+heyllm-report.xml
+examples/quickstart/.heyllm/
 examples/quickstart/tests/captured.yaml
 *.log
 .DS_Store

@@ -18,4 +18,4 @@ jobs:
       - run: npm ci
       - run: npm test                      # build + self-tests (27 assertions, offline)
       - run: node examples/quickstart/run-demo.js   # full offline e2e incl. triage
-      - run: node dist/cli.js run          # dogfood: haechi tests haechi
+      - run: node dist/cli.js run          # dogfood: heyllm tests heyllm

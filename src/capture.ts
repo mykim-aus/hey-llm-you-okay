@@ -1,16 +1,16 @@
 /**
- * Self-Growing Corpus Ledger — `haechi capture "<input>"`.
+ * Self-Growing Corpus Ledger — `heyllm capture "<input>"`.
  *
  * Promote a real-world failure (production complaint, false positive, QA
  * report) into the golden scenario corpus with one command. The ledger is a
  * normal case file: version-controlled, reviewed in PRs, and run on every
- * subsequent `haechi run` forever.
+ * subsequent `heyllm run` forever.
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import YAML from "yaml";
 import { glob } from "./util.js";
-import type { CaseDef, HaechiConfig } from "./types.js";
+import type { CaseDef, HeyLLMConfig } from "./types.js";
 
 export interface CaptureOptions {
   name?: string;
@@ -21,7 +21,7 @@ export interface CaptureOptions {
 }
 
 export async function captureCase(
-  config: HaechiConfig,
+  config: HeyLLMConfig,
   input: string,
   opts: CaptureOptions = {}
 ): Promise<{ file: string; caseName: string; layer: string; reachable: boolean; patterns: string[] }> {
@@ -32,7 +32,7 @@ export async function captureCase(
     config.layers.find((l) => l.kind === "llm")?.name ||
     config.layers.find((l) => l.kind === "judge")?.name;
   if (!layerName)
-    throw new Error("no llm/judge layer to capture into — set settings.capture.layer in haechi.yaml");
+    throw new Error("no llm/judge layer to capture into — set settings.capture.layer in heyllm.yaml");
   const layer = config.layers.find((l) => l.name === layerName);
   if (!layer) throw new Error(`capture layer '${layerName}' not found`);
 

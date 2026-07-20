@@ -39,7 +39,7 @@ export function buildJudgePrompt({
   scale: Scale;
 }): string {
   const items = rubric.map((r) => `- [${r.id}] ${r.question}`).join("\n");
-  return `You are HAECHI, a strict and impartial evaluator of LLM outputs.
+  return `You are HEYLLM, a strict and impartial evaluator of LLM outputs.
 Evaluate the RESPONSE UNDER EVALUATION against each rubric item, considering the CONTEXT.
 Rules:
 - Score every rubric item with an integer from ${scale.min} (completely fails) to ${scale.max} (fully satisfies).

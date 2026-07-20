@@ -6,8 +6,8 @@ import path from "node:path";
 import { loadConfig, ConfigError } from "../dist/index.js";
 
 async function scaffold(configYaml, files = {}) {
-  const dir = await mkdtemp(path.join(tmpdir(), "haechi-"));
-  await writeFile(path.join(dir, "haechi.yaml"), configYaml);
+  const dir = await mkdtemp(path.join(tmpdir(), "heyllm-"));
+  await writeFile(path.join(dir, "heyllm.yaml"), configYaml);
   for (const [rel, content] of Object.entries(files)) {
     const p = path.join(dir, rel);
     await mkdir(path.dirname(p), { recursive: true });
@@ -22,10 +22,10 @@ version: 1
 providers:
   m: { kind: openai-compatible, baseUrl: http://x, model: m1 }
 layers:
-  - { name: s, kind: static, cases: [{ name: a, file: haechi.yaml }] }
+  - { name: s, kind: static, cases: [{ name: a, file: heyllm.yaml }] }
   - { name: b, kind: llm, provider: m, cases: [{ name: c, prompt: hi }] }
 `);
-  const cfg = await loadConfig(path.join(dir, "haechi.yaml"));
+  const cfg = await loadConfig(path.join(dir, "heyllm.yaml"));
   assert.equal(cfg.layers[0].gate, true);
   assert.equal(cfg.layers[1].gate, false);
 });
@@ -37,11 +37,11 @@ test("unknown layer kind / missing provider ref / raw apiKey are rejected", asyn
     `providers: { m: { kind: gemini, model: g, apiKey: sk-123 } }\nlayers: [{ name: a, kind: llm, provider: m, cases: [{name: x, prompt: hi}] }]`,
   ]) {
     const dir = await scaffold(yaml);
-    await assert.rejects(() => loadConfig(path.join(dir, "haechi.yaml")), ConfigError);
+    await assert.rejects(() => loadConfig(path.join(dir, "heyllm.yaml")), ConfigError);
   }
 });
 
-test("profiles overlay providers (--profile / HAECHI_PROFILE)", async () => {
+test("profiles overlay providers (--profile / HEYLLM_PROFILE)", async () => {
   const dir = await scaffold(`
 providers:
   m: { kind: openai-compatible, baseUrl: http://local, model: llama }
@@ -52,12 +52,12 @@ profiles:
 layers:
   - { name: b, kind: llm, provider: m, cases: [{ name: c, prompt: hi }] }
 `);
-  const local = await loadConfig(path.join(dir, "haechi.yaml"));
+  const local = await loadConfig(path.join(dir, "heyllm.yaml"));
   assert.equal(local.providers.m.kind, "openai-compatible");
-  const ci = await loadConfig(path.join(dir, "haechi.yaml"), { profile: "ci" });
+  const ci = await loadConfig(path.join(dir, "heyllm.yaml"), { profile: "ci" });
   assert.equal(ci.providers.m.kind, "gemini");
   assert.equal(ci.profile, "ci");
-  await assert.rejects(() => loadConfig(path.join(dir, "haechi.yaml"), { profile: "nope" }), ConfigError);
+  await assert.rejects(() => loadConfig(path.join(dir, "heyllm.yaml"), { profile: "nope" }), ConfigError);
 });
 
 test("duplicate case names within a layer are rejected (triage/baseline keys)", async () => {
@@ -68,11 +68,11 @@ layers:
   - { name: s, kind: static, include: "tests/*.yaml" }
 `,
     {
-      "tests/a.yaml": `cases: [{ name: dup, file: haechi.yaml }]`,
-      "tests/b.yaml": `cases: [{ name: dup, file: haechi.yaml }]`,
+      "tests/a.yaml": `cases: [{ name: dup, file: heyllm.yaml }]`,
+      "tests/b.yaml": `cases: [{ name: dup, file: heyllm.yaml }]`,
     }
   );
-  const cfg = await loadConfig(path.join(dir, "haechi.yaml"));
+  const cfg = await loadConfig(path.join(dir, "heyllm.yaml"));
   const { loadLayerCases } = await import("../dist/index.js");
   await assert.rejects(() => loadLayerCases(cfg.layers[0], cfg.baseDir), /duplicate case name/);
 });

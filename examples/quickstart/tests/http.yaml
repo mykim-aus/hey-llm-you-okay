@@ -15,6 +15,6 @@ cases:
     request:
       method: POST
       url: "http://127.0.0.1:4141/api/login"
-      json: { user: demo, pass: haechi }
+      json: { user: demo, pass: heyllm }
     expect: { status: 200, jsonPath: { token: { $exists: true } } }
     save: { token: json.token }

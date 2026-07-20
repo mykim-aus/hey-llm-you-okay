@@ -1,8 +1,8 @@
 /**
- * haechi — programmatic API.
+ * heyllm — programmatic API.
  *
- *   import { loadConfig, runSuite } from "haechi";
- *   const config = await loadConfig("haechi.yaml", { profile: "ci" });
+ *   import { loadConfig, runSuite } from "hey-llm-you-okay";
+ *   const config = await loadConfig("heyllm.yaml", { profile: "ci" });
  *   const summary = await runSuite(config, { triage: true });
  */
 export { loadConfig, loadLayerCases, validateCases, ConfigError } from "./config.js";

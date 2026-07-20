@@ -1,9 +1,9 @@
 /**
- * haechi.yaml loader + validator.
+ * heyllm.yaml loader + validator.
  *
  *   version: 1
  *   providers: { name: {kind, model?, baseUrl?, apiKeyEnv?, ...} }
- *   profiles:  { name: { providers: {name: {…overrides}} } }   # --profile / HAECHI_PROFILE
+ *   profiles:  { name: { providers: {name: {…overrides}} } }   # --profile / HEYLLM_PROFILE
  *   settings:  { maxDrop?, triage?: {repeat, source, gitRef}, capture?: {file, layer, defaults} }
  *   layers:    [ {name, kind, include|cases, gate?, provider|subject+judge, env?, vars?, ...} ]
  *
@@ -15,7 +15,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import YAML from "yaml";
 import { glob, isPlainObject, loadEnvFile } from "./util.js";
-import type { CaseDef, HaechiConfig, LayerConfig, LayerKind, ProviderConfig, ProviderKind } from "./types.js";
+import type { CaseDef, HeyLLMConfig, LayerConfig, LayerKind, ProviderConfig, ProviderKind } from "./types.js";
 
 export const LAYER_KINDS: LayerKind[] = ["static", "exec", "http", "llm", "judge"];
 export const PROVIDER_KINDS: ProviderKind[] = ["openai-compatible", "anthropic", "gemini", "command"];
@@ -32,13 +32,13 @@ const suggest = (value: unknown, valid: string[]) =>
 export async function loadConfig(
   configPath?: string,
   { profile }: { profile?: string } = {}
-): Promise<HaechiConfig> {
-  const file = path.resolve(configPath || "haechi.yaml");
+): Promise<HeyLLMConfig> {
+  const file = path.resolve(configPath || "heyllm.yaml");
   let raw: string;
   try {
     raw = await readFile(file, "utf8");
   } catch {
-    err(`config not found: ${file} (run \`haechi init\` to scaffold one)`);
+    err(`config not found: ${file} (run \`heyllm init\` to scaffold one)`);
   }
   let doc: any;
   try {
@@ -49,13 +49,13 @@ export async function loadConfig(
   if (!isPlainObject(doc)) err(`${file}: top level must be a mapping`);
   const d: any = doc; // validated mapping; YAML-shaped access below stays loose
   if (d.version !== undefined && d.version !== 1)
-    err(`${file}: unsupported version ${d.version} (this haechi supports version: 1)`);
+    err(`${file}: unsupported version ${d.version} (this heyllm supports version: 1)`);
 
   // ── providers (+ profile overlay) ──────────────────────────────
   const providers: Record<string, ProviderConfig> = isPlainObject(d.providers)
     ? structuredClone(d.providers)
     : {};
-  const profileName = profile || process.env.HAECHI_PROFILE || null;
+  const profileName = profile || process.env.HEYLLM_PROFILE || null;
   if (profileName) {
     const prof = d.profiles?.[profileName];
     if (!prof)
@@ -102,7 +102,7 @@ export async function loadConfig(
   const baseDir = path.dirname(file);
   const settings = isPlainObject(d.settings) ? (d.settings as any) : {};
 
-  // settings.envFile — load API keys from a local .env so `haechi run` works
+  // settings.envFile — load API keys from a local .env so `heyllm run` works
   // without manual exports. Real env vars always win (CI secrets are safe).
   const envFiles: string[] = settings.envFile
     ? Array.isArray(settings.envFile)

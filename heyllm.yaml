@@ -1,4 +1,4 @@
-# Dogfood — haechi tests haechi with itself.
+# Dogfood — heyllm tests heyllm with itself.
 version: 1
 
 providers: {}   # static/exec only: no models needed

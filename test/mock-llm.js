@@ -40,12 +40,12 @@ export function startMockLLM() {
       if (url === "/api/health") return send(200, { ok: true });
       if (url === "/api/login" && req.method === "POST") {
         const { user, pass } = JSON.parse(body || "{}");
-        if (user === "haechi" && pass === "beast") return send(200, { token: "tok-123" });
+        if (user === "heyllm" && pass === "beast") return send(200, { token: "tok-123" });
         return send(401, { error: "login_required" });
       }
       if (url === "/api/me") {
         if (req.headers.authorization === "Bearer tok-123")
-          return send(200, { email: "haechi@example.com" });
+          return send(200, { email: "heyllm@example.com" });
         return send(401, { error: "unauthorized" });
       }
 

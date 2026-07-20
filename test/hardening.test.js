@@ -14,7 +14,7 @@ import { loadConfig, runSuite, captureCase, loadLayerCases, validateCases } from
 const CLI = path.join(path.dirname(fileURLToPath(import.meta.url)), "../dist/cli.js");
 
 const scaffold = async (files) => {
-  const dir = await mkdtemp(path.join(tmpdir(), "haechi-hard-"));
+  const dir = await mkdtemp(path.join(tmpdir(), "heyllm-hard-"));
   for (const [rel, content] of Object.entries(files)) {
     const p = path.join(dir, rel);
     await mkdir(path.dirname(p), { recursive: true });
@@ -23,8 +23,8 @@ const scaffold = async (files) => {
   return dir;
 };
 
-test("`haechi init` scaffold actually runs (file: refs resolve from the case file)", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "haechi-init-"));
+test("`heyllm init` scaffold actually runs (file: refs resolve from the case file)", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "heyllm-init-"));
   execFileSync("node", [CLI, "init"], { cwd: dir, stdio: "pipe" });
   execFileSync("node", [CLI, "validate"], { cwd: dir, stdio: "pipe" });
   // static layer must find prompts/assistant.txt from tests/static/
@@ -36,7 +36,7 @@ test("`haechi init` scaffold actually runs (file: refs resolve from the case fil
 test("exec layer preserves multi-byte output (chunk-boundary safe)", async () => {
   const long = "한글출력테스트".repeat(12000); // ≫ 64KB, splits mid-character
   const dir = await scaffold({
-    "haechi.yaml": `
+    "heyllm.yaml": `
 providers: {}
 layers:
   - name: e
@@ -46,13 +46,13 @@ layers:
 `,
     "big.txt": long,
   });
-  const s = await runSuite(await loadConfig(path.join(dir, "haechi.yaml")));
+  const s = await runSuite(await loadConfig(path.join(dir, "heyllm.yaml")));
   assert.equal(s.layers[0].cases[0].result.ok, true, JSON.stringify(s.layers[0].cases[0].result.failures));
 });
 
 test("exec timeout kills the whole process tree (no orphan hang)", async () => {
   const dir = await scaffold({
-    "haechi.yaml": `
+    "heyllm.yaml": `
 providers: {}
 layers:
   - name: e
@@ -63,7 +63,7 @@ layers:
 `,
   });
   const started = Date.now();
-  const s = await runSuite(await loadConfig(path.join(dir, "haechi.yaml")));
+  const s = await runSuite(await loadConfig(path.join(dir, "heyllm.yaml")));
   const elapsed = Date.now() - started;
   assert.equal(s.layers[0].cases[0].result.ok, false);
   assert.ok(elapsed < 15000, `runner should not hang past the timeout (took ${elapsed}ms)`);
@@ -72,7 +72,7 @@ layers:
 test("capture REFUSES a malformed ledger instead of overwriting it", async () => {
   const broken = "cases:\n  - name: keep-me\n   bad-indent: [unclosed\n";
   const dir = await scaffold({
-    "haechi.yaml": `
+    "heyllm.yaml": `
 providers:
   m: { kind: openai-compatible, baseUrl: http://x, model: m }
 settings: { capture: { file: tests/captured.yaml } }
@@ -81,14 +81,14 @@ layers:
 `,
     "tests/captured.yaml": broken,
   });
-  const config = await loadConfig(path.join(dir, "haechi.yaml"));
+  const config = await loadConfig(path.join(dir, "heyllm.yaml"));
   await assert.rejects(() => captureCase(config, "새 입력"), /not valid YAML|refusing to overwrite/);
   assert.equal(await readFile(path.join(dir, "tests/captured.yaml"), "utf8"), broken); // untouched
 });
 
 test("validate rejects unknown case keys (mis-indented expect would assert nothing)", async () => {
   const dir = await scaffold({
-    "haechi.yaml": `
+    "heyllm.yaml": `
 providers:
   m: { kind: openai-compatible, baseUrl: http://x, model: m }
 layers:
@@ -97,14 +97,14 @@ layers:
     // `expct` typo: the case would run with NO assertions and pass forever
     "tests/a.yaml": `cases:\n  - name: typo\n    prompt: hi\n    expct: { text: hello }\n`,
   });
-  const config = await loadConfig(path.join(dir, "haechi.yaml"));
+  const config = await loadConfig(path.join(dir, "heyllm.yaml"));
   const problems = validateCases(config.layers[0], await loadLayerCases(config.layers[0], config.baseDir));
   assert.equal(problems.length, 1);
   assert.match(problems[0], /unknown key 'expct'/);
 });
 
 test("--grep with a missing value is a usage error, not a silent all-filtered PASS", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "haechi-grep-"));
+  const dir = await mkdtemp(path.join(tmpdir(), "heyllm-grep-"));
   execFileSync("node", [CLI, "init"], { cwd: dir, stdio: "pipe" });
   let code = 0;
   let stderr = "";
@@ -120,32 +120,32 @@ test("--grep with a missing value is a usage error, not a silent all-filtered PA
 
 test("--version prints the version (not the help screen)", () => {
   const out = execFileSync("node", [CLI, "--version"], { encoding: "utf8" });
-  assert.match(out.trim(), /^haechi \d+\.\d+\.\d+$/);
+  assert.match(out.trim(), /^heyllm \d+\.\d+\.\d+$/);
 });
 
 test("settings.envFile loads keys; real env always wins", async () => {
   const dir = await scaffold({
-    "haechi.yaml": `
+    "heyllm.yaml": `
 providers: {}
 settings: { envFile: .env.test }
 layers:
-  - { name: s, kind: static, cases: [{ name: x, file: haechi.yaml }] }
+  - { name: s, kind: static, cases: [{ name: x, file: heyllm.yaml }] }
 `,
-    ".env.test": `HAECHI_FROM_FILE=loaded\nexport HAECHI_QUOTED="q v"\nHAECHI_ALREADY=from-file\n`,
+    ".env.test": `HEYLLM_FROM_FILE=loaded\nexport HEYLLM_QUOTED="q v"\nHEYLLM_ALREADY=from-file\n`,
   });
-  process.env.HAECHI_ALREADY = "from-shell";
-  await loadConfig(path.join(dir, "haechi.yaml"));
-  assert.equal(process.env.HAECHI_FROM_FILE, "loaded");
-  assert.equal(process.env.HAECHI_QUOTED, "q v");
-  assert.equal(process.env.HAECHI_ALREADY, "from-shell"); // shell/CI secret wins
-  delete process.env.HAECHI_FROM_FILE;
-  delete process.env.HAECHI_QUOTED;
-  delete process.env.HAECHI_ALREADY;
+  process.env.HEYLLM_ALREADY = "from-shell";
+  await loadConfig(path.join(dir, "heyllm.yaml"));
+  assert.equal(process.env.HEYLLM_FROM_FILE, "loaded");
+  assert.equal(process.env.HEYLLM_QUOTED, "q v");
+  assert.equal(process.env.HEYLLM_ALREADY, "from-shell"); // shell/CI secret wins
+  delete process.env.HEYLLM_FROM_FILE;
+  delete process.env.HEYLLM_QUOTED;
+  delete process.env.HEYLLM_ALREADY;
 });
 
 test("exec: ref runs from the PROJECT ROOT, not the case file's directory", async () => {
   const dir = await scaffold({
-    "haechi.yaml": `
+    "heyllm.yaml": `
 providers:
   m: { kind: openai-compatible, baseUrl: http://127.0.0.1:1/v1, model: m }
 layers:
@@ -155,7 +155,7 @@ layers:
     // the case lives 2 levels down; `node root-only.js` only resolves from the root
     "tests/deep/c.yaml": `cases:\n  - name: r\n    system: "exec:node root-only.js"\n    prompt: hi\n`,
   });
-  const config = await loadConfig(path.join(dir, "haechi.yaml"));
+  const config = await loadConfig(path.join(dir, "heyllm.yaml"));
   const { resolveLlmInputs } = await import("../dist/layers/llm.js");
   const layer = config.layers[0];
   const groups = await loadLayerCases(layer, config.baseDir);
@@ -206,7 +206,7 @@ test("llm case rejects keys that only exist on other layers", async () => {
 
 test("capture warns when the ledger is unreachable from the layer's include", async () => {
   const dir = await scaffold({
-    "haechi.yaml": `
+    "heyllm.yaml": `
 providers:
   m: { kind: openai-compatible, baseUrl: http://x, model: m }
 settings: { capture: { file: ledger/out.yaml } }
@@ -215,13 +215,13 @@ layers:
 `,
     "tests/a.yaml": `cases: [{ name: seed, prompt: hi }]`,
   });
-  const config = await loadConfig(path.join(dir, "haechi.yaml"));
+  const config = await loadConfig(path.join(dir, "heyllm.yaml"));
   const res = await captureCase(config, "unreachable input");
   assert.equal(res.reachable, false, "ledger/out.yaml is not matched by tests/*.yaml");
 
   // and the reachable case reports true
   const dir2 = await scaffold({
-    "haechi.yaml": `
+    "heyllm.yaml": `
 providers:
   m: { kind: openai-compatible, baseUrl: http://x, model: m }
 settings: { capture: { file: tests/captured.yaml } }
@@ -230,7 +230,7 @@ layers:
 `,
     "tests/a.yaml": `cases: [{ name: seed, prompt: hi }]`,
   });
-  const res2 = await captureCase(await loadConfig(path.join(dir2, "haechi.yaml")), "reachable input");
+  const res2 = await captureCase(await loadConfig(path.join(dir2, "heyllm.yaml")), "reachable input");
   assert.equal(res2.reachable, true);
 });
 
@@ -260,7 +260,7 @@ test("glob follows symlinked files (parity with exact non-glob paths)", async ()
   const { symlink } = await import("node:fs/promises");
   const dir = await scaffold({
     "real/prompt.txt": "SAFETY rules here\n",
-    "haechi.yaml": `
+    "heyllm.yaml": `
 providers: {}
 layers:
   - name: s
@@ -271,7 +271,7 @@ layers:
   });
   await mkdir(path.join(dir, "linked"), { recursive: true });
   await symlink(path.join(dir, "real/prompt.txt"), path.join(dir, "linked/prompt.txt"));
-  const s = await runSuite(await loadConfig(path.join(dir, "haechi.yaml")));
+  const s = await runSuite(await loadConfig(path.join(dir, "heyllm.yaml")));
   const r = s.layers[0].cases[0].result;
   assert.equal(r.ok, true, JSON.stringify(r.failures));
   assert.equal(r.detail.files, 1);
@@ -291,7 +291,7 @@ test("http redirect: manual lets a case assert the 3xx itself", async () => {
   const base = `http://127.0.0.1:${server.address().port}`;
   try {
     const dir = await scaffold({
-      "haechi.yaml": `
+      "heyllm.yaml": `
 providers: {}
 layers:
   - name: api
@@ -305,7 +305,7 @@ layers:
         expect: { status: 200, json: { ok: true } }
 `,
     });
-    const s = await runSuite(await loadConfig(path.join(dir, "haechi.yaml")));
+    const s = await runSuite(await loadConfig(path.join(dir, "heyllm.yaml")));
     assert.equal(s.layers[0].cases[0].result.ok, true, JSON.stringify(s.layers[0].cases[0].result.failures));
     assert.equal(s.layers[0].cases[1].result.ok, true, JSON.stringify(s.layers[0].cases[1].result.failures));
   } finally {
@@ -398,10 +398,10 @@ test("gemini: non-object tool fixtures are wrapped into a Struct; signature roun
 });
 
 test("{{VAR}} expands ONLY declared env vars (no prompt pollution, no secrets in baseline)", async () => {
-  process.env.HAECHI_DECLARED = "declared-value";
-  process.env.HAECHI_SECRET_KEY = "sk-must-never-appear";
+  process.env.HEYLLM_DECLARED = "declared-value";
+  process.env.HEYLLM_SECRET_KEY = "sk-must-never-appear";
   const dir = await scaffold({
-    "haechi.yaml": `
+    "heyllm.yaml": `
 providers:
   m: { kind: openai-compatible, baseUrl: http://127.0.0.1:1/v1, model: m }
 layers:
@@ -409,14 +409,14 @@ layers:
     kind: llm
     provider: m
     gate: false
-    env: [HAECHI_DECLARED]
+    env: [HEYLLM_DECLARED]
     cases:
       - name: c
-        system: "declared={{HAECHI_DECLARED}} secret={{HAECHI_SECRET_KEY}} tpl={{USER}}"
+        system: "declared={{HEYLLM_DECLARED}} secret={{HEYLLM_SECRET_KEY}} tpl={{USER}}"
         prompt: hi
 `,
   });
-  const config = await loadConfig(path.join(dir, "haechi.yaml"));
+  const config = await loadConfig(path.join(dir, "heyllm.yaml"));
   const { resolveLlmInputs } = await import("../dist/layers/llm.js");
   const layer = config.layers[0];
   const groups = await loadLayerCases(layer, config.baseDir);
@@ -431,10 +431,10 @@ layers:
     config,
   });
   assert.match(inputs.system, /declared=declared-value/);
-  assert.match(inputs.system, /secret=\{\{HAECHI_SECRET_KEY\}\}/, "undeclared secret must stay literal");
+  assert.match(inputs.system, /secret=\{\{HEYLLM_SECRET_KEY\}\}/, "undeclared secret must stay literal");
   assert.match(inputs.system, /tpl=\{\{USER\}\}/, "template placeholders must not collide with env");
-  delete process.env.HAECHI_DECLARED;
-  delete process.env.HAECHI_SECRET_KEY;
+  delete process.env.HEYLLM_DECLARED;
+  delete process.env.HEYLLM_SECRET_KEY;
 });
 
 test("$contains compares scalars symmetrically across strings and arrays", async () => {
@@ -453,7 +453,7 @@ test("$contains compares scalars symmetrically across strings and arrays", async
 
 test("exec case rejects http/llm-only expect keys", async () => {
   const dir = await scaffold({
-    "haechi.yaml": `
+    "heyllm.yaml": `
 providers: {}
 layers:
   - name: e
@@ -463,7 +463,7 @@ layers:
       - { name: wrong-keys, command: "echo hi", expect: { status: { $ne: 500 }, text: { $notContains: "err" } } }
 `,
   });
-  const s = await runSuite(await loadConfig(path.join(dir, "haechi.yaml")));
+  const s = await runSuite(await loadConfig(path.join(dir, "heyllm.yaml")));
   const r = s.layers[0].cases[0].result;
   assert.equal(r.ok, false, "used to silently pass");
   assert.equal(r.failures.filter((f) => /not available on an exec case/.test(f.message)).length, 2);
@@ -471,7 +471,7 @@ layers:
 
 test("validate lints regexes pre-flight (a typo costs 0 paid model calls)", async () => {
   const dir = await scaffold({
-    "haechi.yaml": `
+    "heyllm.yaml": `
 providers:
   m: { kind: openai-compatible, baseUrl: http://x, model: m }
 layers:
@@ -483,7 +483,7 @@ layers:
     expect: { text: { $pattern: "(?i)foo" } }
 `,
   });
-  const config = await loadConfig(path.join(dir, "haechi.yaml"));
+  const config = await loadConfig(path.join(dir, "heyllm.yaml"));
   const problems = validateCases(config.layers[0], await loadLayerCases(config.layers[0], config.baseDir));
   assert.equal(problems.length, 1);
   assert.match(problems[0], /invalid \$pattern/);

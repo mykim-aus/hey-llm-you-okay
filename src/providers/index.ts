@@ -2,7 +2,7 @@
  * Provider registry. Every provider implements Provider.chat(ChatRequest) →
  * ChatResponse with normalized tool calls, so layers and the triage engine are
  * provider-agnostic. Keys come from env via `apiKeyEnv` and are checked at
- * CALL time — offline layers and `haechi validate` never require them.
+ * CALL time — offline layers and `heyllm validate` never require them.
  */
 import type { Provider, ProviderConfig } from "../types.js";
 import { openaiCompat } from "./openaiCompat.js";

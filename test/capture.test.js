@@ -1,6 +1,6 @@
 /**
  * Self-Growing Corpus Ledger: capture appends a runnable case; the next
- * `haechi run` picks it up through the layer's include glob.
+ * `heyllm run` picks it up through the layer's include glob.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -19,9 +19,9 @@ test.after(async () => {
 });
 
 test("capture appends to the ledger with defaults; next run executes it", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "haechi-cap-"));
+  const dir = await mkdtemp(path.join(tmpdir(), "heyllm-cap-"));
   await writeFile(
-    path.join(dir, "haechi.yaml"),
+    path.join(dir, "heyllm.yaml"),
     `
 providers:
   m: { kind: openai-compatible, baseUrl: "${mock.base}/v1", model: mock-1 }
@@ -41,7 +41,7 @@ layers:
   await mkdir(path.join(dir, "tests"), { recursive: true });
   await writeFile(path.join(dir, "tests/base.yaml"), `cases: [{ name: base, prompt: hi, expect: { text: echo } }]`);
 
-  const config = await loadConfig(path.join(dir, "haechi.yaml"));
+  const config = await loadConfig(path.join(dir, "heyllm.yaml"));
   const res = await captureCase(config, "프로덕션에서 오탐이 났던 문장입니다", {
     tags: ["prod-report"],
     note: "user #4821 complaint",
@@ -57,7 +57,7 @@ layers:
   assert.match(res2.caseName, /-02$/);
 
   // the ledger is immediately part of the pyramid
-  const summary = await runSuite(await loadConfig(path.join(dir, "haechi.yaml")));
+  const summary = await runSuite(await loadConfig(path.join(dir, "heyllm.yaml")));
   const names = summary.layers[0].cases.map((c) => c.name);
   assert.ok(names.includes(res.caseName), JSON.stringify(names));
   const captured = summary.layers[0].cases.find((c) => c.name === res.caseName);

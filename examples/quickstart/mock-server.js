@@ -86,7 +86,7 @@ const server = http.createServer((req, res) => {
     if (url === "/api/health") return send(200, { ok: true, service: "demo-app" });
     if (url === "/api/login" && req.method === "POST") {
       const { user, pass } = JSON.parse(body || "{}");
-      if (user === "demo" && pass === "haechi") return send(200, { token: "demo-token" });
+      if (user === "demo" && pass === "heyllm") return send(200, { token: "demo-token" });
       return send(401, { error: "login_required" });
     }
     if (url.endsWith("/chat/completions") && req.method === "POST") {

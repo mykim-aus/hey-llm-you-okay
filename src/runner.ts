@@ -30,7 +30,7 @@ import type {
   CaseDef,
   CaseResult,
   CaseRunRecord,
-  HaechiConfig,
+  HeyLLMConfig,
   LayerConfig,
   LayerKind,
   LayerRunResult,
@@ -69,7 +69,7 @@ export interface RunOptions {
   onLayerStart?: (layer: LayerConfig, caseCount: number) => void;
 }
 
-export async function runSuite(config: HaechiConfig, opts: RunOptions = {}): Promise<RunSummary> {
+export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Promise<RunSummary> {
   const log = opts.log ?? (() => {});
   const providers = createProviders(config.providers);
   const startedAt = new Date();

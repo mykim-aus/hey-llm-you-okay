@@ -73,7 +73,7 @@ function run(
     }, timeoutMs);
     child.stdout.on("data", (d: string) => (out += d));
     child.stderr.on("data", (d: string) => (errOut += d));
-    // a judge CLI that exits without draining stdin must not crash haechi
+    // a judge CLI that exits without draining stdin must not crash heyllm
     child.stdin.on("error", () => {});
     child.on("error", (e) => {
       if (done) return;

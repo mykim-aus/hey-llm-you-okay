@@ -12,7 +12,7 @@
  * model:
  *
  *   arm A (current):  the failing case's inputs as resolved right now
- *   arm B (snapshot): the inputs that last PASSED (from .haechi/baseline.json
+ *   arm B (snapshot): the inputs that last PASSED (from .heyllm/baseline.json
  *                     snapshots, or the prompt files at a git ref)
  *
  * Each arm runs `repeat` times (default 3):
@@ -32,7 +32,7 @@ import type {
   CaseCtx,
   CaseRunRecord,
   Failure,
-  HaechiConfig,
+  HeyLLMConfig,
   LayerConfig,
   Provider,
   ResolvedLlmInputs,
@@ -195,7 +195,7 @@ function verdictOf(current: TriageArm, snapshot: TriageArm | null): { verdict: T
 
 /** Triage every failed llm/judge case of a finished run. */
 export async function triageFailures(
-  config: HaechiConfig,
+  config: HeyLLMConfig,
   providers: Record<string, Provider>,
   failed: Array<{ layer: LayerConfig; record: CaseRunRecord }>,
   makeCtx: (layer: LayerConfig, baseDir: string) => CaseCtx,

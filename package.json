@@ -1,10 +1,10 @@
 {
-  "name": "haechi",
+  "name": "hey-llm-you-okay",
   "version": "0.1.0",
-  "description": "해치(獬豸) — a unified, pyramid-ordered LLM testing CLI for CI/CD. YAML-defined layers (static → exec → http → llm → judge), LLM-as-a-judge gates, and an automated failure-triage protocol (A/B probe) that tells you whether a red test is your prompt's fault or model drift.",
+  "description": "Hey LLM, you okay? — a unified, pyramid-ordered LLM testing CLI for CI/CD. YAML-defined layers (static → exec → http → llm → judge), LLM-as-a-judge gates, and an automated failure-triage protocol (A/B probe) that tells you whether a red test is your prompt's fault or model drift.",
   "type": "module",
   "bin": {
-    "haechi": "./dist/cli.js"
+    "heyllm": "./dist/cli.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -21,6 +21,14 @@
   ],
   "engines": {
     "node": ">=18.18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mykim-aus/hey-llm-you-okay.git"
+  },
+  "homepage": "https://github.com/mykim-aus/hey-llm-you-okay#readme",
+  "bugs": {
+    "url": "https://github.com/mykim-aus/hey-llm-you-okay/issues"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

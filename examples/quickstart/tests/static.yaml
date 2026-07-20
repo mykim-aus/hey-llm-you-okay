@@ -8,5 +8,5 @@ cases:
       - { pattern: "SAFETY", message: "safety section must stay in the system prompt" }
 
   - name: config-is-valid-yaml
-    file: ../haechi.yaml
+    file: ../heyllm.yaml
     yamlValid: true

@@ -3,7 +3,7 @@
  *   1. start the mock backend
  *   2. GREEN run + --update-baseline  → prompt snapshots recorded
  *   3. flip the mock into "drift mode" (simulated silent model update)
- *   4. `haechi triage`               → conversation case fails, verdict: MODEL-DRIFT
+ *   4. `heyllm triage`               → conversation case fails, verdict: MODEL-DRIFT
  *   5. capture a production complaint into the corpus ledger
  */
 import { spawn, execFileSync } from "node:child_process";
@@ -28,8 +28,8 @@ async function waitHealthy() {
   throw new Error("mock server did not start");
 }
 
-function haechi(args) {
-  console.log(`\n$ haechi ${args.join(" ")}\n`);
+function heyllm(args) {
+  console.log(`\n$ heyllm ${args.join(" ")}\n`);
   try {
     execFileSync("node", [cli, ...args], { cwd: here, stdio: "inherit" });
     return 0;
@@ -39,7 +39,7 @@ function haechi(args) {
 }
 
 // clean state so the demo is reproducible
-rmSync(path.join(here, ".haechi"), { recursive: true, force: true });
+rmSync(path.join(here, ".heyllm"), { recursive: true, force: true });
 rmSync(path.join(here, "tests/captured.yaml"), { force: true });
 
 const server = spawn("node", [path.join(here, "mock-server.js")], {
@@ -52,7 +52,7 @@ try {
   console.log("═".repeat(70));
   console.log(" STEP 1 — green pyramid run, snapshots recorded (--update-baseline)");
   console.log("═".repeat(70));
-  const green = haechi(["run", "--update-baseline"]);
+  const green = heyllm(["run", "--update-baseline"]);
   if (green !== 0) throw new Error("expected the baseline run to pass");
 
   console.log("\n" + "═".repeat(70));
@@ -62,9 +62,9 @@ try {
   console.log("(mock: chatbot silently loses multi-turn context)");
 
   console.log("\n" + "═".repeat(70));
-  console.log(" STEP 3 — haechi triage: is it OUR prompt or THEIR model?");
+  console.log(" STEP 3 — heyllm triage: is it OUR prompt or THEIR model?");
   console.log("═".repeat(70));
-  const red = haechi(["triage"]);
+  const red = heyllm(["triage"]);
   if (red === 0) throw new Error("expected the drifted run to fail");
 
   await fetch(`http://127.0.0.1:${PORT}/__config`, { method: "POST", body: '{"drift":false}' });
@@ -72,8 +72,8 @@ try {
   console.log("\n" + "═".repeat(70));
   console.log(" STEP 4 — capture a production complaint into the corpus ledger");
   console.log("═".repeat(70));
-  haechi(["capture", "환불 규정 알려달라니까 자꾸 딴소리를 해요", "--tags", "prod,refund", "--note", "CS ticket #4821"]);
-  haechi(["validate"]);
+  heyllm(["capture", "환불 규정 알려달라니까 자꾸 딴소리를 해요", "--tags", "prod,refund", "--note", "CS ticket #4821"]);
+  heyllm(["validate"]);
 
   console.log("\n✅ demo complete — pyramid, gates, judge, triage(MODEL-DRIFT), capture all live.");
 } finally {

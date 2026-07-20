@@ -36,8 +36,8 @@ layers:
 `;
 
 async function scaffold(promptWord) {
-  const dir = await mkdtemp(path.join(tmpdir(), "haechi-triage-"));
-  await writeFile(path.join(dir, "haechi.yaml"), CONFIG.replaceAll("{{MOCK}}", mock.base));
+  const dir = await mkdtemp(path.join(tmpdir(), "heyllm-triage-"));
+  await writeFile(path.join(dir, "heyllm.yaml"), CONFIG.replaceAll("{{MOCK}}", mock.base));
   await mkdir(path.join(dir, "tests"), { recursive: true });
   await mkdir(path.join(dir, "prompts"), { recursive: true });
   await writeFile(path.join(dir, "prompts/sys.txt"), `SAY: ${promptWord}\n`);
@@ -53,13 +53,13 @@ async function scaffold(promptWord) {
   return dir;
 }
 
-const run = async (dir, opts = {}) => runSuite(await loadConfig(path.join(dir, "haechi.yaml")), opts);
+const run = async (dir, opts = {}) => runSuite(await loadConfig(path.join(dir, "heyllm.yaml")), opts);
 
 test("triage verdict: YOUR-CHANGE — old prompt passes, new prompt fails", async () => {
   const dir = await scaffold("MAGIC");
   const green = await run(dir, { updateBaseline: true });
   assert.equal(green.layers[0].ok, true, "baseline run must be green");
-  const baseline = JSON.parse(await readFile(path.join(dir, ".haechi/baseline.json"), "utf8"));
+  const baseline = JSON.parse(await readFile(path.join(dir, ".heyllm/baseline.json"), "utf8"));
   assert.ok(baseline.snapshots["b/says-magic"], "snapshot recorded");
 
   // the "developer" breaks the prompt
@@ -90,8 +90,8 @@ test("triage verdict: MODEL-DRIFT — inputs identical to snapshot, provider dri
 });
 
 test("triage verdict: FLAKY — isolated re-run passes", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "haechi-triage-"));
-  await writeFile(path.join(dir, "haechi.yaml"), CONFIG.replaceAll("{{MOCK}}", mock.base));
+  const dir = await mkdtemp(path.join(tmpdir(), "heyllm-triage-"));
+  await writeFile(path.join(dir, "heyllm.yaml"), CONFIG.replaceAll("{{MOCK}}", mock.base));
   await mkdir(path.join(dir, "tests"), { recursive: true });
   await writeFile(
     path.join(dir, "tests/cases.yaml"),
@@ -116,9 +116,9 @@ test("triage verdict: NO-SNAPSHOT when nothing green was ever recorded (non-git 
 });
 
 test("judge-layer baseline: score regression flags the case", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "haechi-reg-"));
+  const dir = await mkdtemp(path.join(tmpdir(), "heyllm-reg-"));
   await writeFile(
-    path.join(dir, "haechi.yaml"),
+    path.join(dir, "heyllm.yaml"),
     `
 providers:
   m: { kind: openai-compatible, baseUrl: "{{MOCK}}/v1", model: mock-1 }
@@ -130,20 +130,20 @@ layers:
     subject: m
     judge: j
     gate: false
-    env: [HAECHI_TEST_WORD]   # declared → interpolatable (no blanket env fallback)
+    env: [HEYLLM_TEST_WORD]   # declared → interpolatable (no blanket env fallback)
     cases:
       - name: quality
-        input: { system: "SAY: {{HAECHI_TEST_WORD}}", prompt: "질문" }
+        input: { system: "SAY: {{HEYLLM_TEST_WORD}}", prompt: "질문" }
         rubric: [{ id: helpful, question: "도움?" }]
 `.replaceAll("{{MOCK}}", mock.base)
   );
-  process.env.HAECHI_TEST_WORD = "좋은답변"; // mock judge scores 9
+  process.env.HEYLLM_TEST_WORD = "좋은답변"; // mock judge scores 9
   const green = await run(dir, { updateBaseline: true });
   assert.equal(green.layers[0].cases[0].result.score, 9);
 
-  process.env.HAECHI_TEST_WORD = "BADWORD"; // mock judge scores 3 → drop 6 > maxDrop 1
+  process.env.HEYLLM_TEST_WORD = "BADWORD"; // mock judge scores 3 → drop 6 > maxDrop 1
   const red = await run(dir);
-  delete process.env.HAECHI_TEST_WORD;
+  delete process.env.HEYLLM_TEST_WORD;
   const r = red.layers[0].cases[0].result;
   assert.equal(r.ok, false);
   assert.ok(r.failures.some((f) => f.path === "baseline"), JSON.stringify(r.failures));
