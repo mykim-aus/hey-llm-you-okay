@@ -107,19 +107,30 @@ test("compare: an empty resolved side fails loudly — verified nothing", async 
   assert.match(r.failures[0].message, /empty|verified nothing/i);
 });
 
-test("compare: a .json side (parsed to an object) fails with a typed error, not a diff", async () => {
+test("compare: a .json snapshot is compared as TEXT against its generator", async () => {
+  // resolveRef auto-parses .json into an object for every other layer. compare
+  // must NOT do that: pinning a JSON artifact against the command that emits it
+  // is the most natural use, and exec: always yields text — an object-vs-string
+  // pair would make it impossible. Found on a real project (smoveth), where a
+  // 16-tool declaration snapshot is exactly this shape.
+  const json = '[{"name":"end_session"},{"name":"show_recap"}]';
   const dir = await scaffold({
-    "data.json": '{"a":1}',
-    "text.txt": "some text",
+    "snapshot.json": json,
+    // generators, so the YAML carries no embedded JSON quoting
+    "gen-same.sh": `#!/bin/sh\ncat snapshot.json\n`,
+    "gen-drift.sh": `#!/bin/sh\nprintf '[{"name":"end_session"}]'\n`,
     "heyllm.yaml": CONFIG(
-      `      - name: cmp
-        compare: { left: file:data.json, right: file:text.txt }`
+      `      - name: matches
+        compare: { left: "exec:sh gen-same.sh", right: file:snapshot.json }
+      - name: drifted
+        compare: { left: "exec:sh gen-drift.sh", right: file:snapshot.json }`
     ),
   });
   const s = await run(dir);
-  const r = caseOf(s, "s", "cmp").result;
-  assert.equal(r.ok, false);
-  assert.match(r.failures[0].message, /text refs|resolved to/);
+  assert.equal(caseOf(s, "s", "matches").result.ok, true, "an unchanged JSON snapshot must pass");
+  const drift = caseOf(s, "s", "drifted").result;
+  assert.equal(drift.ok, false, "a changed tool schema must fail");
+  assert.match(drift.failures[0].message, /chars vs/);
 });
 
 test("validateCases: compare alongside forbid, bad mode, and bare paths are all problems", async () => {

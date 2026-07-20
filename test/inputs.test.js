@@ -132,3 +132,118 @@ layers:
 `);
   await assert.rejects(() => loadConfig(path.join(dir, "heyllm.yaml")), /only applies to llm\/judge/);
 });
+
+// ── regressions from the 0.1.7 adversarial audit ─────────────────────────────
+
+test("REGRESSION: {{var}} cannot launder provenance past the 0-byte floor", async () => {
+  // `system: "{{SYS}}"` expanding to a file: ref used to classify as `inline`,
+  // which disabled the unconditional 0-byte floor for exactly the case it exists
+  // to catch: a declared prompt ref that resolves to nothing.
+  const dir = await scaffold(
+    `
+providers:
+  subject: { kind: openai-compatible, baseUrl: "{{MOCK}}", model: mock, apiKeyEnv: X }
+layers:
+  - name: behavior
+    kind: llm
+    provider: subject
+    vars: { SYS: "file:empty.txt" }
+    cases:
+      - { name: laundered, system: "{{SYS}}", prompt: hi, expect: { text: "" } }
+`,
+    { "empty.txt": "   \n\t\n" }
+  );
+  process.env.X = "x";
+  const s = await runSuite(await loadConfig(path.join(dir, "heyllm.yaml")));
+  const r = s.layers[0].cases[0].result;
+  assert.equal(r.ok, false, "an interpolated ref resolving to nothing must still fail");
+  assert.equal(r.failures[0].path, "inputs.system");
+});
+
+test("REGRESSION: an interpolated exec ref SATISFIES inputs.system: exec", async () => {
+  // The same blind spot in the other direction: a legitimate case rejected.
+  const dir = await scaffold(`
+providers:
+  subject: { kind: openai-compatible, baseUrl: "{{MOCK}}", model: mock, apiKeyEnv: X }
+layers:
+  - name: behavior
+    kind: llm
+    provider: subject
+    inputs: { system: exec }
+    vars: { SYS: "exec:printf 'a real production prompt'" }
+    cases:
+      - { name: viaVar, system: "{{SYS}}", prompt: hi, expect: { text: "" } }
+`);
+  process.env.X = "x";
+  const s = await runSuite(await loadConfig(path.join(dir, "heyllm.yaml")));
+  assert.equal(s.layers[0].cases[0].result.ok, true, "an exec: ref reached through a var must satisfy the contract");
+});
+
+test("REGRESSION: a whitespace-only inline system does not satisfy 'required'", async () => {
+  const dir = await scaffold(`
+providers:
+  subject: { kind: openai-compatible, baseUrl: "{{MOCK}}", model: mock, apiKeyEnv: X }
+layers:
+  - name: behavior
+    kind: llm
+    provider: subject
+    inputs: { system: required }
+    cases:
+      - { name: blank, system: "   ", prompt: hi, expect: { text: "" } }
+`);
+  process.env.X = "x";
+  const s = await runSuite(await loadConfig(path.join(dir, "heyllm.yaml")));
+  assert.equal(s.layers[0].cases[0].result.ok, false, "whitespace is not a prompt");
+});
+
+test("REGRESSION: an empty `inputs: {}` block is a config error, not a silent no-op", async () => {
+  const dir = await scaffold(`
+providers:
+  subject: { kind: openai-compatible, baseUrl: "{{MOCK}}", model: mock, apiKeyEnv: X }
+layers:
+  - name: behavior
+    kind: llm
+    provider: subject
+    inputs: {}
+    cases:
+      - { name: a, prompt: hi, expect: { text: "" } }
+`);
+  await assert.rejects(() => loadConfig(path.join(dir, "heyllm.yaml")), /enforces nothing/);
+});
+
+test("REGRESSION: a broken system ref is attributed, not an opaque runner failure", async () => {
+  const dir = await scaffold(`
+providers:
+  subject: { kind: openai-compatible, baseUrl: "{{MOCK}}", model: mock, apiKeyEnv: X }
+layers:
+  - name: behavior
+    kind: llm
+    provider: subject
+    cases:
+      - { name: broken, system: "exec:sh -c 'exit 7'", prompt: hi, expect: { text: "" } }
+`);
+  process.env.X = "x";
+  const s = await runSuite(await loadConfig(path.join(dir, "heyllm.yaml")));
+  const r = s.layers[0].cases[0].result;
+  assert.equal(r.ok, false);
+  assert.equal(r.failures[0].path, "inputs", "a broken prompt builder must not land in the generic runner bucket");
+});
+
+test("REGRESSION: a contract failure is never adjudicated FLAKY by triage", async () => {
+  const dir = await scaffold(`
+providers:
+  subject: { kind: openai-compatible, baseUrl: "{{MOCK}}", model: mock, apiKeyEnv: X }
+layers:
+  - name: behavior
+    kind: llm
+    provider: subject
+    inputs: { system: exec }
+    cases:
+      - { name: bare, prompt: hi, expect: { text: "" } }
+`);
+  process.env.X = "x";
+  const s = await runSuite(await loadConfig(path.join(dir, "heyllm.yaml")), { triage: true });
+  // The probe re-runs through produceLlm with the contract off, so both arms
+  // would "pass" and it would confidently report FLAKY for an unmeasured case.
+  assert.ok(!s.triage || !s.triage.length, "a deterministic contract miss must not enter the A/B probe");
+});

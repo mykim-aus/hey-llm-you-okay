@@ -316,7 +316,16 @@ export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Pro
     const failed = layerResults.flatMap((lr) => {
       const layer = config.layers.find((l) => l.name === lr.name)!;
       return lr.cases
-        .filter((r) => !r.result.ok && (layer.kind === "llm" || layer.kind === "judge"))
+        // An input-contract failure is deterministic and already names its own
+        // fix. The A/B probe re-runs the case through produceLlm directly, with
+        // the contract not applied — so it would "pass" both arms and report a
+        // confident FLAKY for a case that has not been measured at all.
+        .filter(
+          (r) =>
+            !r.result.ok &&
+            (layer.kind === "llm" || layer.kind === "judge") &&
+            !(r.result.failures || []).some((f) => f.path === "inputs.system" || f.path === "inputs")
+        )
         .map((record) => ({ layer, record }));
     });
     if (failed.length) {

@@ -68,9 +68,8 @@ function normMessages(list: any[]): ChatMessage[] {
  */
 export async function resolveLlmInputs(cs: Record<string, any>, ctx: CaseCtx): Promise<ResolvedLlmInputs> {
   const root = ctx.config.baseDir; // exec: refs are project commands → run from the root
-  const system = (await resolveRef(interpolateDeep(cs.system, ctx.lookup), ctx.baseDir, root)) as
-    | string
-    | undefined;
+  const systemRef = interpolateDeep(cs.system, ctx.lookup);
+  const system = (await resolveRef(systemRef, ctx.baseDir, root)) as string | undefined;
   let tools = (await resolveRef(cs.tools, ctx.baseDir, root)) as any;
   if (typeof tools === "string") tools = JSON.parse(tools);
   const toolResponses: Record<string, unknown> = {};
@@ -88,6 +87,7 @@ export async function resolveLlmInputs(cs: Record<string, any>, ctx: CaseCtx): P
     tools,
     toolResponses,
     params: cs.params || {},
+    systemRef,
     providerName: (ctx.layer.provider ?? ctx.layer.subject) as string | undefined,
   };
   if (cs.conversation) return { ...base, mode: "conversation", conversation: cs.conversation };
@@ -314,7 +314,15 @@ export async function produceLlm(
 
 export async function runLlmCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult> {
   const provider = ctx.providers[ctx.layer.provider as string];
-  const inputs = await resolveLlmInputs(cs, ctx);
+  // Resolution runs OUTSIDE the per-attempt try/catch, so a prompt-builder that
+  // exits non-zero or a moved prompt file would land in the generic runner
+  // bucket with no path. Attribute it to the ref that actually broke.
+  let inputs: ResolvedLlmInputs;
+  try {
+    inputs = await resolveLlmInputs(cs, ctx);
+  } catch (e: any) {
+    return { ok: false, failures: [{ path: "inputs", message: `could not resolve case inputs: ${e.message}` }] };
+  }
   // Before any paid call: is the case sending what this layer's contract claims,
   // and did a declared system ref actually resolve to something? A miss here is
   // a hard failure that costs zero tokens.

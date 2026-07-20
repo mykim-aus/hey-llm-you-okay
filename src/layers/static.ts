@@ -94,7 +94,10 @@ async function runCompareCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult> {
   // got to ask", so it is NOT tagged infra.
   const resolveSide = async (side: "left" | "right"): Promise<{ value: unknown } | { fail: Failure }> => {
     try {
-      return { value: await resolveRef((spec as any)[side], ctx.baseDir, ctx.config.baseDir) };
+      // raw: compare is about the artifact's bytes. Without this, `file:x.json`
+      // parses to an object while `exec:` yields text, and pinning a JSON
+      // snapshot against its generator — the most natural use — is impossible.
+      return { value: await resolveRef((spec as any)[side], ctx.baseDir, ctx.config.baseDir, { raw: true }) };
     } catch (e: any) {
       return { fail: { path: `compare.${side}`, message: `could not resolve ${(spec as any)[side]}: ${e.message}` } };
     }

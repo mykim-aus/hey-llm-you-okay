@@ -34,17 +34,42 @@ export const INPUTS_SYSTEM_MODES: string[] = ["required", "file", "exec"];
 export class InputContractError extends Error {}
 
 /**
- * Where a case's system prompt comes from — read off the YAML BEFORE resolution.
- * After resolution an exec: result and a hand-typed literal are both just a
- * string, so provenance is only knowable here. judge cases nest it under input:.
+ * Classify one system-prompt VALUE. Must be given the value AFTER {{var}}
+ * interpolation and BEFORE ref resolution: `system: "{{PROMPT}}"` where the var
+ * expands to `file:…` used to classify as `inline`, which both rejected a valid
+ * case under `system: file` and — worse — disabled the 0-byte floor for it.
+ * After ref resolution an exec: result and a hand-typed literal are both just a
+ * string, so this is the only point where provenance exists.
  */
-export function systemSource(cs: CaseDef, kind: LayerKind): SystemSource {
-  const raw = kind === "judge" ? cs.input?.system : cs.system;
-  if (raw === undefined || raw === null || raw === "") return "absent";
+export function classifySystem(raw: unknown): SystemSource {
+  if (raw === undefined || raw === null) return "absent";
   if (typeof raw !== "string") return "inline";
+  if (!raw.trim()) return "absent"; // whitespace-only is not a prompt
   if (raw.startsWith("exec:")) return "exec";
   if (raw.startsWith("file:")) return "file";
   return "inline";
+}
+
+/**
+ * A judge case that supplies `output:`/`transcript:` never calls the subject, so
+ * it has no system prompt to constrain. getSubjectOutput returns on those BEFORE
+ * touching `input:`, so the exemption must key on the same precedence — keying
+ * on `input === undefined` made validate reject a case that run exempted.
+ */
+export function isJudgeExempt(cs: CaseDef, kind: LayerKind): boolean {
+  return kind === "judge" && (cs.output !== undefined || cs.transcript !== undefined || cs.input === undefined);
+}
+
+/** Provenance read off the YAML, for lint and census. */
+export function systemSource(cs: CaseDef, kind: LayerKind): SystemSource {
+  return classifySystem(kind === "judge" ? cs.input?.system : cs.system);
+}
+
+/** True when the YAML value still contains an un-expanded {{var}} — provenance
+ *  is not knowable until run time, so validate must not guess. */
+export function isInterpolated(cs: CaseDef, kind: LayerKind): boolean {
+  const raw = kind === "judge" ? cs.input?.system : cs.system;
+  return typeof raw === "string" && /\{\{[^}]+\}\}/.test(raw);
 }
 
 // Whether a source satisfies a declared mode.
@@ -76,7 +101,10 @@ const fixHint = (mode: InputsSystemMode) =>
 export function lintInputsContract(layer: LayerConfig, cs: CaseDef, at: string): string[] {
   const mode = contractOf(layer);
   if (!mode) return [];
-  if (layer.kind === "judge" && cs.input === undefined) return []; // output:/transcript: case
+  if (isJudgeExempt(cs, layer.kind)) return [];
+  // An un-expanded {{var}} is only knowable at run time; guessing here would
+  // reject valid cases. checkInputContract re-runs this on the expanded value.
+  if (isInterpolated(cs, layer.kind)) return [];
   const source = systemSource(cs, layer.kind);
   if (!sourceSatisfies(source, mode as InputsSystemMode))
     return [
@@ -95,7 +123,11 @@ export function lintInputsContract(layer: LayerConfig, cs: CaseDef, at: string):
  *           calls the validator.
  */
 export function checkInputContract(cs: CaseDef, inputs: ResolvedLlmInputs, layer: LayerConfig): Failure[] {
-  const source = systemSource(cs, layer.kind);
+  if (isJudgeExempt(cs, layer.kind)) return [];
+  // Classify from the value resolveLlmInputs actually interpolated, not the raw
+  // YAML — otherwise `system: "{{PROMPT}}"` expanding to a file: ref is read as
+  // an inline literal and the 0-byte floor never fires for it.
+  const source = classifySystem(inputs.systemRef ?? (layer.kind === "judge" ? cs.input?.system : cs.system));
   const fails: Failure[] = [];
 
   // Rule 1 — the floor. A ref was given; nothing came back.

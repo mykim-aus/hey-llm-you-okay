@@ -181,6 +181,8 @@ Both sides must be `file:`/`exec:` refs (a bare path would silently compare a 15
 └ first divergence   print-system-p…:31 / system-prompt.txt:31   (byte 1,180 of 58,392)
 ```
 
+Both sides are read as **bytes**, so a `.json` snapshot compares cleanly against the command that generates it (elsewhere a `file:` ref ending `.json` is parsed into an object; `compare:` deliberately does not).
+
 `normalized` (the default) ignores trailing whitespace and blank-line runs — otherwise the very first use goes red because `resolveRef` trims `exec:` output but not `file:` text. A green compare still reports `bytesIdentical: false` so nothing is waived silently. An empty resolved side is always a failure: a builder that prints nothing verified nothing.
 
 ### `exec` — wrap anything

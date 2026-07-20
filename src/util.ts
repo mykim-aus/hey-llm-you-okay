@@ -126,7 +126,11 @@ function runExecRef(cmd: string, cwd: string): Promise<string> {
 export async function resolveRef(
   value: unknown,
   baseDir: string,
-  execCwd: string = baseDir
+  execCwd: string = baseDir,
+  /** `compare:` wants the artifact's BYTES. Auto-parsing a .json file into an
+   *  object makes the most natural comparison — a JSON snapshot pinned against
+   *  a generator's stdout — impossible, since exec: always yields text. */
+  opts: { raw?: boolean } = {}
 ): Promise<unknown> {
   if (typeof value !== "string") return value;
   if (value.startsWith("exec:")) {
@@ -135,7 +139,7 @@ export async function resolveRef(
   if (!value.startsWith("file:")) return value;
   const p = path.resolve(baseDir, value.slice(5));
   const text = await readFile(p, "utf8");
-  if (/\.json$/i.test(p)) {
+  if (!opts.raw && /\.json$/i.test(p)) {
     try {
       return JSON.parse(text);
     } catch (e: any) {

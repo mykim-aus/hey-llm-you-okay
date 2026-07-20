@@ -336,6 +336,9 @@ export interface ResolvedLlmInputs {
   /** name of the provider this case runs against, for error attribution */
   providerName?: string;
   system?: string;
+  /** the system value AFTER {{var}} interpolation but BEFORE ref resolution —
+   *  the only point where file:/exec:/inline provenance is knowable */
+  systemRef?: unknown;
   tools?: ToolDecl[];
   toolResponses: Record<string, unknown>;
   params: Record<string, any>;
