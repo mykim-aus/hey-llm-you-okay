@@ -155,6 +155,8 @@ export interface Settings {
   maxDrop?: number;
   triage?: TriageSettings;
   capture?: CaptureSettings;
+  /** .env file(s) to load before running; real env vars always win */
+  envFile?: string | string[];
 }
 
 export interface HaechiConfig {

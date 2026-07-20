@@ -69,9 +69,10 @@ interface SubjectOutput {
 
 /** Obtain the text to judge + its context. Calls the subject provider only for input: mode. */
 async function getSubjectOutput(cs: CaseDef, ctx: CaseCtx): Promise<SubjectOutput> {
+  const root = ctx.config.baseDir;
   if (cs.output !== undefined) {
-    const output = (await resolveRef(interpolateDeep(cs.output, ctx.lookup), ctx.baseDir)) as string;
-    const context = cs.context ? ((await resolveRef(cs.context, ctx.baseDir)) as string) : "";
+    const output = (await resolveRef(interpolateDeep(cs.output, ctx.lookup), ctx.baseDir, root)) as string;
+    const context = cs.context ? ((await resolveRef(cs.context, ctx.baseDir, root)) as string) : "";
     return { output, context, resolvedInputs: null };
   }
   if (cs.transcript) {
@@ -92,8 +93,14 @@ async function getSubjectOutput(cs: CaseDef, ctx: CaseCtx): Promise<SubjectOutpu
   const subject = ctx.providers[ctx.layer.subject as string];
   const inputs = await resolveLlmInputs(cs.input, ctx);
   const out = await produceLlm(subject, inputs, { maxRounds: cs.input.maxRounds ?? 3 });
+  const output = out.lastText || out.text;
+  if (!output.trim() && out.unanswered.length)
+    throw new Error(
+      `the subject called ${out.unanswered.map((t) => `'${t}'`).join(", ")} and is waiting for a tool response, so it never produced text. ` +
+        `Add a fixture under input.toolResponses (or set input.params.toolResponseDefault: {} to auto-answer any tool).`
+    );
   return {
-    output: out.lastText || out.text,
+    output,
     context: renderTranscript(out.transcript.slice(0, -1)),
     resolvedInputs: inputs,
   };

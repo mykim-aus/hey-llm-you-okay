@@ -42,12 +42,15 @@ function normMessages(list: any[]): ChatMessage[] {
  * This object is what the triage engine snapshots: the artifact under test.
  */
 export async function resolveLlmInputs(cs: Record<string, any>, ctx: CaseCtx): Promise<ResolvedLlmInputs> {
-  const system = (await resolveRef(interpolateDeep(cs.system, ctx.lookup), ctx.baseDir)) as string | undefined;
-  let tools = (await resolveRef(cs.tools, ctx.baseDir)) as any;
+  const root = ctx.config.baseDir; // exec: refs are project commands → run from the root
+  const system = (await resolveRef(interpolateDeep(cs.system, ctx.lookup), ctx.baseDir, root)) as
+    | string
+    | undefined;
+  let tools = (await resolveRef(cs.tools, ctx.baseDir, root)) as any;
   if (typeof tools === "string") tools = JSON.parse(tools);
   const toolResponses: Record<string, unknown> = {};
   for (const [name, fixture] of Object.entries(cs.toolResponses || {})) {
-    let v = await resolveRef(fixture, ctx.baseDir);
+    let v = await resolveRef(fixture, ctx.baseDir, root);
     if (typeof v === "string") {
       try {
         v = JSON.parse(v);
@@ -66,6 +69,8 @@ interface TurnOutcome {
   lastText: string;
   toolCalls: ToolCall[];
   finalMessages: ChatMessage[];
+  /** tools the model called that had no fixture — the turn could not continue */
+  unanswered: string[];
 }
 
 /** One completion incl. tool-fixture feedback rounds. */
@@ -78,6 +83,7 @@ async function completeTurn(
   const allCalls: ToolCall[] = [];
   let text = "";
   let lastText = "";
+  let unanswered: string[] = [];
   const convo = [...messages];
   for (let round = 0; round < maxRounds; round++) {
     const res = await provider.chat({
@@ -91,15 +97,31 @@ async function completeTurn(
     text += (text && res.text ? " " : "") + (res.text || "");
     if (res.text) lastText = res.text;
     allCalls.push(...res.toolCalls);
-    const answerable = res.toolCalls.filter((c) => inputs.toolResponses[c.name] !== undefined);
-    if (!res.toolCalls.length || !answerable.length) break;
+    if (!res.toolCalls.length) {
+      unanswered = [];
+      break;
+    }
+    // EVERY tool call must be answered — a partial tool_results block is a
+    // protocol violation on all three APIs. `toolResponseDefault` lets the
+    // turn continue past tools the case doesn't care about.
+    const fallback = inputs.params.toolResponseDefault;
+    const missing = res.toolCalls.filter((c) => inputs.toolResponses[c.name] === undefined);
+    if (missing.length && fallback === undefined) {
+      unanswered = [...new Set(missing.map((c) => c.name))];
+      break; // model is waiting for a response we cannot give
+    }
+    unanswered = [];
     convo.push({ role: "assistant", content: res.text, toolCalls: res.toolCalls });
     convo.push({
       role: "tool",
-      toolResults: answerable.map((c) => ({ id: c.id, name: c.name, response: inputs.toolResponses[c.name] })),
+      toolResults: res.toolCalls.map((c) => ({
+        id: c.id,
+        name: c.name,
+        response: inputs.toolResponses[c.name] ?? fallback,
+      })),
     });
   }
-  return { text, lastText, toolCalls: allCalls, finalMessages: convo };
+  return { text, lastText, toolCalls: allCalls, finalMessages: convo, unanswered };
 }
 
 export interface LlmActual {
@@ -197,6 +219,7 @@ export async function produceLlm(
     const final = last as TurnOutcome;
     // conversation: final reply text, tool calls accumulated across ALL turns
     return { ...final, toolCalls: allCalls, transcript: messages };
+    // (unanswered carries through from the final turn)
   }
   const messages: ChatMessage[] =
     inputs.mode === "messages" ? [...(inputs.messages || [])] : [{ role: "user", content: inputs.prompt }];

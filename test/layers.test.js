@@ -300,3 +300,44 @@ console.log("SAY: EXECMAGIC");
   const calls = await readFile(path.join(dir, "calls.log"), "utf8");
   assert.equal(calls.trim().split("\n").length, 1); // memoized
 });
+
+test("unfixtured tool call: clear error in judge, continuable via toolResponseDefault", async () => {
+  const mk = (params) => `
+providers:
+  m: { kind: openai-compatible, baseUrl: "{{MOCK}}/v1", model: mock-1 }
+  j: { kind: openai-compatible, baseUrl: "{{MOCK}}/v1", model: mock-1 }
+layers:
+  - name: q
+    kind: judge
+    subject: m
+    judge: j
+    gate: false
+    cases:
+      - name: c
+        input:
+          prompt: "오늘 날씨 어때?"
+          tools: file:fixtures/tools.json
+          ${params}
+        rubric: [{ id: helpful, question: "도움?" }]
+`;
+  const tools = {
+    "fixtures/tools.json": JSON.stringify([
+      { name: "get_weather", parameters: { type: "object", properties: { city: { type: "string" } } } },
+    ]),
+  };
+
+  // (a) no fixture → actionable error naming the tool, not "empty output"
+  const bare = await run(await scaffold(mk(""), tools));
+  const f = caseOf(bare, "q", "c").result;
+  assert.equal(f.ok, false);
+  assert.match(f.failures[0].message, /'get_weather'/);
+  assert.match(f.failures[0].message, /toolResponseDefault|toolResponses/);
+
+  // (b) toolResponseDefault lets the turn continue to real text
+  const withDefault = await run(
+    await scaffold(mk(`params: { toolResponseDefault: { city: "서울", temp: 23, sky: "맑음" } }`), tools)
+  );
+  const ok = caseOf(withDefault, "q", "c").result;
+  assert.equal(ok.ok, true, JSON.stringify(ok.failures));
+  assert.match(ok.output, /맑음/);
+});

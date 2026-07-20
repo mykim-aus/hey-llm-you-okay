@@ -161,6 +161,7 @@ cases:
     prompt: "오늘 날씨 어때?"
     tools: file:../fixtures/tools.json
     toolResponses: { get_weather: { temp: 23, sky: "맑음" } }   # fed back, turn continues
+    params: { toolResponseDefault: {} }            # auto-answer any OTHER tool it calls
     expect:
       toolCalled: get_weather
       toolArgs: { get_weather: { city: 서울 } }
@@ -193,9 +194,33 @@ Also accepts `output:` (judge a pre-recorded text) or `transcript:` (judge the l
 
 `$pattern` `$notPattern` (+`$flags`) · `$eq` `$ne` `$in` · `$gt` `$gte` `$lt` `$lte` · `$exists` · `$contains` `$notContains` · `$length` `$minLength` `$maxLength` · `$type` · `$any` `$all`. Literal objects are deep subsets; bare strings on `text`/`stdout` mean *contains*. Unknown expect keys **fail loudly** — a typo never silently passes.
 
+**Every tool call must be answered.** If the model calls a tool with no fixture, the turn stalls waiting for a response — haechi says so by name instead of reporting a blank reply. Give it a fixture, or set `params.toolResponseDefault` to auto-answer the tools your case doesn't care about.
+
+## Prompts that are built by code (`exec:` refs)
+
+Real prompts are often assembled at runtime — a builder function, DB-loaded persona, retrieved context — not stored as a flat file. `exec:` runs a command and uses its **stdout** as the value, with `cwd` = the project root (where `haechi.yaml` lives):
+
+```yaml
+system: "exec:node scripts/print-system-prompt.mjs hidden"
+tools:  "exec:node scripts/print-tool-declarations.mjs"
+```
+
+Output is memoized per process (repeat/votes/triage arms reuse it), and triage snapshots store the **resolved** text — so code-built prompts still get full A/B drift detection.
+
+> Writing the glue script: if your script ends with `process.exit()`, flush first — `process.stdout.write(data, () => process.exit(0))`. A bare `process.exit()` truncates piped output.
+
+## Config: keys without manual exports
+
+```yaml
+settings:
+  envFile: .env        # or [.env, .env.local]
+```
+
+Loaded before the run; **real environment variables always win**, so CI secrets are never shadowed by a stale local `.env`.
+
 ## The core workflow: prompt regression
 
-Your prompts are `file:` refs. That means **every prompt edit is a config change haechi can see**:
+Your prompts are `file:` (or `exec:`) refs. That means **every prompt edit is a change haechi can see**:
 
 ```bash
 vim prompts/chatbot.txt        # ← the risky change

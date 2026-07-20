@@ -38,12 +38,32 @@ export async function captureCase(
   const relFile = capture.file || "tests/captured.yaml";
   const file = path.resolve(config.baseDir, relFile);
 
+  // A missing ledger is fine (first capture). A MALFORMED ledger must abort —
+  // silently starting a fresh doc would overwrite the whole captured corpus.
   let doc: { kind?: string; cases: CaseDef[] };
+  let raw: string | null = null;
   try {
-    doc = YAML.parse(await readFile(file, "utf8")) || { cases: [] };
-    if (!Array.isArray(doc.cases)) doc.cases = [];
-  } catch {
+    raw = await readFile(file, "utf8");
+  } catch (e: any) {
+    if (e.code !== "ENOENT") throw new Error(`cannot read ledger ${relFile}: ${e.message}`);
+  }
+  if (raw === null) {
     doc = { kind: layer.kind, cases: [] };
+  } else {
+    let parsed: any;
+    try {
+      parsed = YAML.parse(raw);
+    } catch (e: any) {
+      throw new Error(
+        `ledger ${relFile} is not valid YAML (${e.message}) — fix it before capturing, refusing to overwrite ${raw.length} bytes`
+      );
+    }
+    doc = parsed || { kind: layer.kind, cases: [] };
+    if (!Array.isArray(doc.cases)) {
+      if (parsed && Object.keys(parsed).length)
+        throw new Error(`ledger ${relFile} has no 'cases' array — refusing to overwrite it`);
+      doc.cases = [];
+    }
   }
 
   const today = new Date().toISOString().slice(0, 10).replace(/-/g, "");

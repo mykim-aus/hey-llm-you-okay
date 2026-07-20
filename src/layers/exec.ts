@@ -21,24 +21,42 @@ export async function runExecCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult
     stderr: string;
     timedOut: boolean;
   }>((resolve) => {
+    // detached → the child leads its own process group, so a timeout can kill
+    // the WHOLE tree (`sh -c "npx jest"` spawns grandchildren that would
+    // otherwise survive and hang the runner forever).
     const child = spawn("sh", ["-c", cs.command], {
       cwd,
       env: { ...process.env, ...(cs.env || {}) },
       stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
     });
+    // setEncoding: decode on the stream so multi-byte characters are never
+    // split across chunk boundaries (Korean/Japanese output would corrupt).
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    const killTree = () => {
+      try {
+        process.kill(-(child.pid as number), "SIGKILL"); // negative pid = group
+      } catch {
+        try {
+          child.kill("SIGKILL");
+        } catch {}
+      }
+    };
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGKILL");
+      killTree();
     }, timeoutMs);
     const cap = (s: string) => (s.length > CAP ? s.slice(-CAP) : s);
-    child.stdout.on("data", (d) => (stdout = cap(stdout + d)));
-    child.stderr.on("data", (d) => (stderr = cap(stderr + d)));
-    child.on("error", (e) =>
-      resolve({ exitCode: -1, stdout, stderr: `${stderr}\nspawn error: ${e.message}`, timedOut })
-    );
+    child.stdout.on("data", (d: string) => (stdout = cap(stdout + d)));
+    child.stderr.on("data", (d: string) => (stderr = cap(stderr + d)));
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      resolve({ exitCode: -1, stdout, stderr: `${stderr}\nspawn error: ${e.message}`, timedOut });
+    });
     child.on("close", (code) => {
       clearTimeout(timer);
       resolve({ exitCode: timedOut ? -1 : code, stdout, stderr, timedOut });

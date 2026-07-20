@@ -223,9 +223,22 @@ export async function triageFailures(
       continue;
     }
 
-    // current arm inputs — resolved fresh from the working tree
+    // current arm inputs — resolved fresh from the working tree.
+    // A broken file:/exec: ref must degrade to one report, never abort the run
+    // (the summary and CI report would be lost).
     const defForInputs = layer.kind === "llm" ? record.def : record.def.input;
-    const currentInputs = await resolveLlmInputs(defForInputs, ctx);
+    let currentInputs;
+    try {
+      currentInputs = await resolveLlmInputs(defForInputs, ctx);
+    } catch (e: any) {
+      reports.push({
+        layer: layer.name,
+        caseName: record.name,
+        verdict: "inconclusive",
+        reason: `could not resolve the case inputs for triage: ${e.message}`,
+      });
+      continue;
+    }
     const current = await runArm("current", record, layer, ctx, currentInputs, repeat);
 
     // early exit: isolated re-run passes → flaky, don't burn the old arm

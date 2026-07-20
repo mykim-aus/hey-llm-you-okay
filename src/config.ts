@@ -14,7 +14,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import YAML from "yaml";
-import { glob, isPlainObject } from "./util.js";
+import { glob, isPlainObject, loadEnvFile } from "./util.js";
 import type { CaseDef, HaechiConfig, LayerConfig, LayerKind, ProviderConfig, ProviderKind } from "./types.js";
 
 export const LAYER_KINDS: LayerKind[] = ["static", "exec", "http", "llm", "judge"];
@@ -99,15 +99,19 @@ export async function loadConfig(
     return { ...l, gate } as LayerConfig;
   });
 
-  return {
-    file,
-    baseDir: path.dirname(file),
-    version: 1,
-    profile: profileName,
-    providers,
-    layers,
-    settings: isPlainObject(d.settings) ? (d.settings as any) : {},
-  };
+  const baseDir = path.dirname(file);
+  const settings = isPlainObject(d.settings) ? (d.settings as any) : {};
+
+  // settings.envFile — load API keys from a local .env so `haechi run` works
+  // without manual exports. Real env vars always win (CI secrets are safe).
+  const envFiles: string[] = settings.envFile
+    ? Array.isArray(settings.envFile)
+      ? settings.envFile
+      : [settings.envFile]
+    : [];
+  for (const rel of envFiles) await loadEnvFile(path.resolve(baseDir, rel));
+
+  return { file, baseDir, version: 1, profile: profileName, providers, layers, settings };
 }
 
 export interface CaseGroup {
@@ -149,14 +153,32 @@ export async function loadLayerCases(layer: LayerConfig, baseDir: string): Promi
   return groups;
 }
 
-/** Per-kind required-field lint. Returns human-readable problem strings. */
+/** Keys a case may carry, per layer kind. An unknown key is almost always a
+ *  typo or a mis-indented block (e.g. `expect` nested one level too deep),
+ *  which would leave the case asserting NOTHING and passing forever. */
+const COMMON_KEYS = ["name", "tags", "skip", "note", "capturedAt", "expect"];
+const KIND_KEYS: Record<string, string[]> = {
+  static: ["file", "files", "mustExist", "forbid", "require", "jsonValid", "yamlValid", "maxBytes"],
+  exec: ["command", "cwd", "env", "timeoutMs"],
+  http: ["request", "save"],
+  llm: ["system", "prompt", "messages", "conversation", "tools", "toolResponses", "params", "maxRounds", "repeat", "passRate"],
+  judge: ["input", "output", "transcript", "context", "rubric", "scale", "votes", "threshold", "minScores", "judgeParams"],
+};
+
+/** Per-kind required-field + unknown-key lint. Returns problem strings. */
 export function validateCases(layer: LayerConfig, groups: CaseGroup[]): string[] {
   const problems: string[] = [];
   const need = (cond: unknown, file: string | null, cs: CaseDef, msg: string) => {
     if (!cond) problems.push(`${file || "(inline)"} › ${cs.name}: ${msg}`);
   };
+  const allowed = new Set([...COMMON_KEYS, ...(KIND_KEYS[layer.kind] || [])]);
   for (const g of groups) {
     for (const cs of g.cases) {
+      for (const key of Object.keys(cs))
+        if (!allowed.has(key))
+          problems.push(
+            `${g.file || "(inline)"} › ${cs.name}: unknown key '${key}' for a ${layer.kind} case (typo or mis-indented block? allowed: ${[...allowed].join(", ")})`
+          );
       switch (layer.kind) {
         case "static":
           need(cs.file || cs.files, g.file, cs, "needs 'file' or 'files'");

@@ -60,6 +60,8 @@ function run(
       cwd,
       stdio: ["pipe", "pipe", "pipe"],
     });
+    child.stdout.setEncoding("utf8"); // never split multi-byte chars on chunks
+    child.stderr.setEncoding("utf8");
     let out = "";
     let errOut = "";
     let done = false;
@@ -69,8 +71,10 @@ function run(
       child.kill("SIGKILL");
       reject(new Error(`command provider timed out after ${timeoutMs}ms: ${cmd}`));
     }, timeoutMs);
-    child.stdout.on("data", (d) => (out += d));
-    child.stderr.on("data", (d) => (errOut += d));
+    child.stdout.on("data", (d: string) => (out += d));
+    child.stderr.on("data", (d: string) => (errOut += d));
+    // a judge CLI that exits without draining stdin must not crash haechi
+    child.stdin.on("error", () => {});
     child.on("error", (e) => {
       if (done) return;
       done = true;
