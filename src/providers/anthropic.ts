@@ -5,6 +5,12 @@ import type { ChatRequest, ChatResponse, ProviderConfig, ToolCall } from "../typ
 import { postJson } from "../util.js";
 import { requireKey } from "./index.js";
 
+/** Unwrap a ```json … ``` (or bare ```) fence when the whole reply is one block. */
+function stripJsonFence(text: string): string {
+  const m = text.trim().match(/^```(?:json)?\s*\n?([\s\S]*?)\n?\s*```$/i);
+  return m ? m[1].trim() : text;
+}
+
 export function anthropic(cfg: ProviderConfig, name: string) {
   const base = (cfg.baseUrl || "https://api.anthropic.com").replace(/\/$/, "");
   return {
@@ -36,7 +42,19 @@ export function anthropic(cfg: ProviderConfig, name: string) {
         max_tokens: req.maxTokens ?? cfg.maxTokens ?? 2048,
         messages,
       };
-      if (req.system) body.system = req.system;
+      // The Messages API has no `response_format`, so `json: true` is honoured
+      // by instruction plus fence-stripping on the way out. Without this the
+      // flag was accepted, threaded through the layer, and silently dropped
+      // here — the caller then got a fenced ```json block that `jsonPath`
+      // could not parse, which reads as a model failure rather than an
+      // unsupported option. Skipped when tools are in play: a tool-use turn
+      // legitimately returns no text at all.
+      const wantsJson = !!req.json && !req.tools?.length;
+      const jsonRule =
+        "Respond with a single raw JSON value and nothing else. " +
+        "No prose, no explanation, and no markdown code fences.";
+      if (req.system || wantsJson)
+        body.system = [req.system, wantsJson ? jsonRule : null].filter(Boolean).join("\n\n");
       // Newer Claude models removed sampling params — sending them is a 400.
       const omitTemp =
         cfg.omitTemperature ?? /^claude-(opus-4-[78]|sonnet-5|fable-5)/.test(cfg.model ?? "");
@@ -65,6 +83,10 @@ export function anthropic(cfg: ProviderConfig, name: string) {
         else if (block.type === "tool_use")
           toolCalls.push({ id: block.id, name: block.name, args: block.input || {} });
       }
+      // Models still fence JSON often enough that instruction alone is not a
+      // contract. Unwrapping here means `json: true` behaves the same on every
+      // provider, which is the only reason the option is worth having.
+      if (wantsJson) text = stripJsonFence(text);
       return { text, toolCalls, raw: out };
     },
   };

@@ -37,6 +37,7 @@ import type {
   LayerKind,
   LayerRunResult,
   Provider,
+  InfraProblem,
   RunSummary,
 } from "./types.js";
 import { makeLookup, pool } from "./util.js";
@@ -125,6 +126,41 @@ export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Pro
         skipped: msg,
         durationMs: 0,
         cases: [],
+      });
+      if (layer.gate) gateBroken = true;
+      continue;
+    }
+
+    // A layer may name a provider that only some profile supplies (that is how
+    // paid layers stay out of the default run). Config validation accepts it;
+    // running without that profile has to say so, not crash on `undefined.chat`
+    // and not quietly pass.
+    const providerRefs = (
+      layer.kind === "llm" ? [layer.provider] : layer.kind === "judge" ? [layer.subject, layer.judge] : []
+    ).filter(Boolean) as string[];
+    const absent = providerRefs.filter((r) => !providers[r]);
+    if (absent.length) {
+      const msg =
+        `provider ${absent.map((a) => `'${a}'`).join(", ")} is not defined` +
+        (config.profile ? ` in profile '${config.profile}'` : " without a profile") +
+        ` — this layer needs a profile that supplies it (try --profile <name>)`;
+      layerResults.push({
+        name: layer.name,
+        kind: layer.kind,
+        gate: layer.gate,
+        ok: false,
+        durationMs: 0,
+        cases: [
+          {
+            name: `layer:${layer.name}`,
+            tags: [],
+            file: null,
+            durationMs: 0,
+            def: { name: `layer:${layer.name}` } as CaseDef,
+            baseDir: config.baseDir,
+            result: { ok: false, failures: [{ path: "provider", message: msg, infra: true }] },
+          },
+        ],
       });
       if (layer.gate) gateBroken = true;
       continue;
@@ -234,13 +270,30 @@ export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Pro
     log(`baseline updated: ${file}`);
   }
 
+  // A provider we could not reach produced no verdict at all, so it must not be
+  // absorbed by a non-gated layer the way a wrong answer is. Collected across
+  // every layer regardless of `gate`, and it forces `ok: false` on its own.
+  const infra: InfraProblem[] = layerResults.flatMap((lr) =>
+    lr.cases.flatMap((r) =>
+      (r.result.failures || [])
+        .filter((f) => f.infra)
+        .map((f) => ({
+          layer: lr.name,
+          case: r.name,
+          provider: f.path === "provider" ? undefined : f.path,
+          message: f.message,
+        }))
+    )
+  );
+
   const summary: RunSummary = {
-    ok: layerResults.every((l) => l.ok || !l.gate),
+    ok: layerResults.every((l) => l.ok || !l.gate) && !infra.length,
     startedAt: startedAt.toISOString(),
     durationMs: Date.now() - startedAt.getTime(),
     profile: config.profile,
     layers: layerResults,
     halted,
+    ...(infra.length ? { infra } : {}),
   };
 
   if (opts.triage) {

@@ -25,7 +25,7 @@ import type {
   ResolvedLlmInputs,
   ToolCall,
 } from "../types.js";
-import { deepGet, interpolateDeep, resolveRef } from "../util.js";
+import { ProviderError, callProvider, deepGet, interpolateDeep, resolveRef } from "../util.js";
 import { runDispatchBlock } from "./dispatch.js";
 
 const toArr = (v: unknown): string[] => (v === undefined ? [] : Array.isArray(v) ? v : [v as string]);
@@ -59,7 +59,13 @@ export async function resolveLlmInputs(cs: Record<string, any>, ctx: CaseCtx): P
     }
     toolResponses[name] = v;
   }
-  const base = { system, tools, toolResponses, params: cs.params || {} };
+  const base = {
+    system,
+    tools,
+    toolResponses,
+    params: cs.params || {},
+    providerName: (ctx.layer.provider ?? ctx.layer.subject) as string | undefined,
+  };
   if (cs.conversation) return { ...base, mode: "conversation", conversation: cs.conversation };
   if (cs.messages) return { ...base, mode: "messages", messages: normMessages(cs.messages) };
   return { ...base, mode: "prompt", prompt: interpolateDeep(cs.prompt, ctx.lookup) };
@@ -87,14 +93,16 @@ async function completeTurn(
   let unanswered: string[] = [];
   const convo = [...messages];
   for (let round = 0; round < maxRounds; round++) {
-    const res = await provider.chat({
-      system: inputs.system,
-      messages: convo,
-      tools: inputs.tools,
-      temperature: inputs.params.temperature,
-      maxTokens: inputs.params.maxTokens,
-      json: inputs.params.json,
-    });
+    const res = await callProvider(inputs.providerName, () =>
+      provider.chat({
+        system: inputs.system,
+        messages: convo,
+        tools: inputs.tools,
+        temperature: inputs.params.temperature,
+        maxTokens: inputs.params.maxTokens,
+        json: inputs.params.json,
+      })
+    );
     text += (text && res.text ? " " : "") + (res.text || "");
     if (res.text) lastText = res.text;
     allCalls.push(...res.toolCalls);
@@ -305,7 +313,11 @@ export async function runLlmCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult>
       }
       attempts.push({ ok: !failures.length, failures, toolNames: actual.toolNames, text: actual.text });
     } catch (e: any) {
-      attempts.push({ ok: false, failures: [{ path: "provider", message: e.message }] });
+      const infra = e instanceof ProviderError;
+      attempts.push({
+        ok: false,
+        failures: [{ path: infra ? "provider" : "runner", message: e.message, infra }],
+      });
     }
   }
   const passed = attempts.filter((a) => a.ok).length;

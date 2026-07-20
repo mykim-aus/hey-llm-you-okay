@@ -65,6 +65,13 @@ export async function loadConfig(
     for (const [name, override] of Object.entries(prof.providers || {}))
       providers[name] = { ...(providers[name] || {}), ...(override as object) } as ProviderConfig;
   }
+  // provider name → the profiles that declare it, for layers that reference a
+  // provider only some profile supplies.
+  const profileProviders = new Map<string, string[]>();
+  for (const [pname, prof] of Object.entries(d.profiles || {}))
+    for (const provider of Object.keys((prof as any)?.providers || {}))
+      profileProviders.set(provider, [...(profileProviders.get(provider) || []), pname]);
+
   for (const [name, p] of Object.entries(providers)) {
     if (!isPlainObject(p)) err(`providers.${name}: must be a mapping`);
     if (!PROVIDER_KINDS.includes(p.kind)) err(`providers.${name}.kind: ${suggest(p.kind, PROVIDER_KINDS)}`);
@@ -92,8 +99,16 @@ export async function loadConfig(
     for (const field of needsProvider) {
       const ref = l[field];
       if (!ref) err(`${at} (${l.name}): '${field}' provider reference is required for kind '${l.kind}'`);
-      if (!providers[ref])
-        err(`${at}.${field}: unknown provider '${ref}' (defined: ${Object.keys(providers).join(", ") || "none"})`);
+      // A provider declared only inside a profile is a legitimate reference —
+      // that is how a suite keeps its paid layers out of the default run. It
+      // is accepted here and enforced at run time instead, where an inactive
+      // profile fails the layer loudly rather than at parse time.
+      if (!providers[ref] && !profileProviders.has(ref))
+        err(
+          `${at}.${field}: unknown provider '${ref}' (defined: ${
+            [...new Set([...Object.keys(providers), ...profileProviders.keys()])].join(", ") || "none"
+          })`
+        );
     }
     const gate = l.gate !== undefined ? !!l.gate : !["llm", "judge"].includes(l.kind);
     return { ...l, gate } as LayerConfig;

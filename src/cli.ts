@@ -133,6 +133,10 @@ async function cmdRun(argv: Argv, forceTriage = false): Promise<number> {
     }
     console.log(c.dim(`report written: ${file}`));
   }
+  // 2, not 1: an unreachable provider is a config/environment problem, not a
+  // failing test. Exiting 1 would tell CI "your prompt broke" when the truth is
+  // "we never got to ask".
+  if (summary.infra?.length) return 2;
   return summary.ok ? 0 : 1;
 }
 

@@ -33,7 +33,7 @@ $ heyllm triage
 
 `heyllm triage` adjudicates automatically: it isolates the failing case, re-runs it N×, then A/B-probes **current inputs vs. the last-passing snapshot** under *today's* model. Snapshots live in `.heyllm/baseline.json` (cheap, local, committed) — no `git checkout`, no double builds. Git is only a fallback (`git show` per file). And if your inputs are *byte-identical* to the snapshot, the B-arm is skipped entirely: the verdict is `MODEL-DRIFT` at zero extra cost.
 
-**3. The chain does not end at the model.** Every other LLM testing tool stops at *"did the model say the right thing"*. Real bugs live one step later: the model calls the right tool and the UI still doesn't change. A `dispatch` block folds the model's calls through **your** reducer and asserts the state a user would actually have seen — so "model was right, app did nothing" fails loudly instead of passing.
+**3. The chain does not end at the model.** Asserting the tool call is table stakes — promptfoo, DeepEval and the agent frameworks all do it. Real bugs live one step later: the model calls the right tool and the UI still doesn't change. You *can* reach that with a custom JS assertion in other tools; heyllm gives it a first-class shape. A `dispatch` block folds the model's calls through **your** reducer and asserts the state a user would actually have seen — and it also runs standalone on **recorded** calls, so "model was right, app did nothing" is caught by a free, deterministic layer on every commit instead of a paid one.
 
 **4. It tells you when the judge cannot be trusted — on the axis where it actually breaks.** Measured on a real case: the same rubric item scored **(9,8) then (2,3) then (10,9)** across three runs. Agreement *within* each run was perfect, so a vote-spread check calls all three "stable" — and the middle run's tight agreement stamps confidence on a verdict 6 points off. The instability is on the **time** axis, and more votes cannot see it. heyllm keeps a run-axis ledger (`.heyllm/ledger.json`, written on pass **and** fail) and returns **INCONCLUSIVE** when scores swing across runs — with attribution: an identical output hash means the *judge* moved, so the fix is a decision rule, not more samples.
 
@@ -398,6 +398,22 @@ providers:
     outputPath: result
 ```
 
+A `command` provider has no tool-call protocol, so it suits `judge` layers and text-only `llm` cases. Point a case with `tools:` at one and it fails immediately naming the provider — rather than reporting that the model declined to call your tool.
+
+**Paid layers, opt-in.** A layer may reference a provider that only a profile defines. Without that profile the layer fails loudly (exit 2) instead of being skipped, so a cheap default run and an expensive CI run can live in one config:
+
+```yaml
+providers:
+  judge: { kind: command, command: claude, args: ["-p"], outputPath: result }
+profiles:
+  live:
+    providers:
+      subject: { kind: anthropic, model: claude-sonnet-5, apiKeyEnv: ANTHROPIC_API_KEY }
+layers:
+  - { name: quality, kind: judge, subject: judge, judge: judge, include: tests/judge/*.yaml }
+  - { name: routing, kind: llm, provider: subject, include: tests/routing/*.yaml }  # needs --profile live
+```
+
 ## CI/CD (GitHub Actions)
 
 ```yaml
@@ -421,7 +437,9 @@ jobs:
         with: { name: heyllm-report, path: heyllm-report.xml }
 ```
 
-Exit codes: `0` pass · `1` gated failure · `2` config/usage error. Triage verdicts are embedded in the JUnit failure text, so your CI UI shows *why* it failed, not just *that* it failed.
+Exit codes: `0` pass · `1` gated failure · `2` config/usage error **or an unreachable provider**. Triage verdicts are embedded in the JUnit failure text, so your CI UI shows *why* it failed, not just *that* it failed.
+
+> **A provider we could not reach is never a pass.** If the API is down, the key is missing, or your local Ollama isn't running, those cases produced *no verdict* — so they are reported under `◆ NOT VERIFIED`, force a non-zero result even on a warn-only layer, and exit **2** rather than 1. "We never got to ask" is a different fact from "we asked and it failed", and only one of them means your prompt is broken.
 
 ## CLI
 

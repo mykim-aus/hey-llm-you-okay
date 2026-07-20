@@ -216,6 +216,10 @@ export interface HeyLLMConfig {
 export interface Failure {
   path?: string;
   message: string;
+  /** The provider could not be reached, authenticated, or understood — so the
+   *  model never answered and this case has NO verdict, passing or failing.
+   *  Distinct from a wrong answer, and never silenced by a non-gated layer.  */
+  infra?: boolean;
 }
 
 export interface VoteResult {
@@ -257,6 +261,8 @@ export interface ConvTurn {
 
 export interface ResolvedLlmInputs {
   mode: "prompt" | "messages" | "conversation";
+  /** name of the provider this case runs against, for error attribution */
+  providerName?: string;
   system?: string;
   tools?: ToolDecl[];
   toolResponses: Record<string, unknown>;
@@ -333,6 +339,18 @@ export interface RunSummary {
   /** layers not executed because a gated layer failed earlier (pyramid stop) */
   halted: string[];
   triage?: TriageReport[];
+  /** A provider was unreachable/unauthorised, so part of the suite produced no
+   *  verdict at all. Reported separately from `ok` because "we could not ask"
+   *  is not "we asked and it was fine" — the CLI exits 2 (usage/config) on it
+   *  even when every executed case passed.                                    */
+  infra?: InfraProblem[];
+}
+
+export interface InfraProblem {
+  layer: string;
+  case: string;
+  provider?: string;
+  message: string;
 }
 
 // ── triage (A/B probe) ────────────────────────────────────────────

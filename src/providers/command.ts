@@ -13,7 +13,7 @@
  */
 import { spawn } from "node:child_process";
 import type { ChatRequest, ChatResponse, ProviderConfig } from "../types.js";
-import { deepGet, truncate } from "../util.js";
+import { ProviderError, deepGet, truncate } from "../util.js";
 
 function buildPrompt(req: ChatRequest): string {
   const parts: string[] = [];
@@ -25,9 +25,21 @@ function buildPrompt(req: ChatRequest): string {
   return parts.join("\n\n");
 }
 
-export function command(cfg: ProviderConfig) {
+export function command(cfg: ProviderConfig, name = "command") {
   return {
     async chat(req: ChatRequest): Promise<ChatResponse> {
+      // A CLI has no tool-call protocol, so a case that declares tools would
+      // otherwise get `toolCalls: []` back and fail as "the model never called
+      // get_weather" — blaming the prompt for a provider limitation. Say the
+      // real thing instead.
+      if (req.tools?.length)
+        throw new ProviderError(
+          `provider '${name}' (kind: command) cannot make tool calls, but this case declares ` +
+            `${req.tools.length} tool(s): ${req.tools.map((t) => t.name).join(", ")}. ` +
+            `Point the layer at an API provider (anthropic / openai-compatible / gemini), ` +
+            `or drop the tool expectations from the case.`,
+          name
+        );
       const prompt = buildPrompt(req);
       const stdout = await run(cfg.command as string, cfg.args || [], prompt, {
         timeoutMs: cfg.timeoutMs ?? 120000,

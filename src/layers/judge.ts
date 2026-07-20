@@ -41,7 +41,14 @@ import type {
   Scale,
   VoteResult,
 } from "../types.js";
-import { extractJson, interpolateDeep, resolveRef, truncate } from "../util.js";
+import {
+  ProviderError,
+  callProvider,
+  extractJson,
+  interpolateDeep,
+  resolveRef,
+  truncate,
+} from "../util.js";
 import { itemFingerprint, itemKey, runAxisSpread, shortHash } from "../ledger.js";
 import { produceLlm, resolveLlmInputs } from "./llm.js";
 
@@ -209,12 +216,14 @@ async function askJudge(
     // parameter for models that reject sampling params entirely.
     const temperature =
       judgeParams && "temperature" in judgeParams ? (judgeParams.temperature ?? undefined) : 0;
-    const res = await judgeProvider.chat({
-      messages: [{ role: "user", content: prompt }],
-      temperature,
-      maxTokens: judgeParams?.maxTokens ?? 1024,
-      json: true,
-    });
+    const res = await callProvider("judge", () =>
+      judgeProvider.chat({
+        messages: [{ role: "user", content: prompt }],
+        temperature,
+        maxTokens: judgeParams?.maxTokens ?? 1024,
+        json: true,
+      })
+    );
     const vote = normalizeVote(extractJson(res.text), rubric, scale, output);
     if (vote) return vote;
     prompt = `${basePrompt}\n\nREMINDER: your previous output was invalid. Output ONLY the JSON object, with an answer for EVERY rubric id: ${rubric
@@ -265,7 +274,16 @@ export async function runJudgeCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResul
   try {
     subject = await getSubjectOutput(cs, ctx);
   } catch (e: any) {
-    return { ok: false, failures: [{ path: "subject", message: `producing output failed: ${e.message}` }] };
+    return {
+      ok: false,
+      failures: [
+        {
+          path: "subject",
+          message: `producing output failed: ${e.message}`,
+          infra: e instanceof ProviderError,
+        },
+      ],
+    };
   }
   if (!String(subject.output).trim())
     return { ok: false, failures: [{ path: "subject", message: "subject produced empty output" }] };
@@ -293,7 +311,11 @@ export async function runJudgeCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResul
         });
       }
     } catch (e: any) {
-      failures.push({ path: `vote[${v}]`, message: `judge call failed: ${e.message}` });
+      failures.push({
+        path: `vote[${v}]`,
+        message: `judge call failed: ${e.message}`,
+        infra: e instanceof ProviderError,
+      });
     }
   }
   if (!voteResults.length) {

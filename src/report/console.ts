@@ -104,6 +104,20 @@ export function printSummary(summary: RunSummary, verbose = false): void {
     );
   if (summary.triage?.length) printTriage(summary.triage);
   console.log("");
+  // Surfaced before the verdict line, and phrased as "nothing was verified"
+  // rather than "a test failed" — the whole point of tracking this separately
+  // is that no verdict exists for these cases.
+  if (summary.infra?.length) {
+    console.log(c.red(c.bold("◆ NOT VERIFIED — a provider could not be reached")));
+    for (const p of summary.infra)
+      console.log(
+        `  ${c.red("!")} ${p.layer}/${p.case}${p.provider ? c.dim(` [${p.provider}]`) : ""}\n      ${p.message}`
+      );
+    console.log(
+      c.dim("  these cases produced no verdict; exit code 2 (config/environment), not 1")
+    );
+    console.log("");
+  }
   const total = summary.layers.reduce((s, l) => s + l.cases.length, 0);
   const passed = summary.layers.reduce((s, l) => s + l.cases.filter((r) => r.result.ok).length, 0);
   const verdict = summary.ok ? c.green("PASS") : c.red("FAIL");
