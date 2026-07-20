@@ -15,6 +15,9 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import YAML from "yaml";
 import { envFileVars, glob, isPlainObject, loadEnvFile } from "./util.js";
+import { normalizeCompareSpec } from "./compare.js";
+import { INPUTS_SYSTEM_MODES, lintInputsContract } from "./inputs.js";
+import { checkDispatchMode } from "./layers/dispatch.js";
 import type { CaseDef, HeyLLMConfig, LayerConfig, LayerKind, ProviderConfig, ProviderKind } from "./types.js";
 
 export const LAYER_KINDS: LayerKind[] = ["static", "exec", "http", "llm", "judge", "dispatch"];
@@ -110,6 +113,15 @@ export async function loadConfig(
           })`
         );
     }
+    if (l.inputs !== undefined) {
+      if (l.kind !== "llm" && l.kind !== "judge")
+        err(`${at} (${l.name}): 'inputs' only applies to llm/judge layers, not '${l.kind}'`);
+      if (!isPlainObject(l.inputs)) err(`${at}.inputs: must be a mapping`);
+      for (const k of Object.keys(l.inputs))
+        if (k !== "system") err(`${at}.inputs: unknown key '${k}' (only 'system' is supported)`);
+      if (l.inputs.system !== undefined && !INPUTS_SYSTEM_MODES.includes(l.inputs.system))
+        err(`${at}.inputs.system: ${suggest(l.inputs.system, INPUTS_SYSTEM_MODES)}`);
+    }
     const gate = l.gate !== undefined ? !!l.gate : !["llm", "judge"].includes(l.kind);
     return { ...l, gate } as LayerConfig;
   });
@@ -196,14 +208,21 @@ export async function loadLayerCases(
 /** Keys a case may carry, per layer kind. An unknown key is almost always a
  *  typo or a mis-indented block (e.g. `expect` nested one level too deep),
  *  which would leave the case asserting NOTHING and passing forever. */
-const COMMON_KEYS = ["name", "tags", "skip", "note", "capturedAt", "expect"];
+// `source` is one nested mapping, not flat keys: `file` is claimed by static,
+// `input`/`context` by judge, `note`/`capturedAt` are already here — a flat
+// id/url would collide the moment a new kind wants those names. One nested key
+// verified absent from every KIND_KEYS list costs a single COMMON entry.
+const COMMON_KEYS = ["name", "tags", "skip", "note", "capturedAt", "expect", "source"];
+// The file-mode static keys — mutually exclusive with `compare:`.
+const STATIC_FILE_KEYS = ["file", "files", "mustExist", "forbid", "require", "jsonValid", "yamlValid", "maxBytes"];
+
 const KIND_KEYS: Record<string, string[]> = {
-  static: ["file", "files", "mustExist", "forbid", "require", "jsonValid", "yamlValid", "maxBytes"],
+  static: ["file", "files", "mustExist", "forbid", "require", "jsonValid", "yamlValid", "maxBytes", "compare"],
   exec: ["command", "cwd", "env", "timeoutMs"],
   http: ["request", "save"],
   llm: ["system", "prompt", "messages", "conversation", "tools", "toolResponses", "params", "maxRounds", "repeat", "passRate", "dispatch"],
   judge: ["input", "output", "transcript", "context", "rubric", "scale", "votes", "threshold", "minScores", "judgeParams", "reliability"],
-  dispatch: ["module", "export", "initialState", "calls"],
+  dispatch: ["module", "export", "command", "args", "cwd", "env", "timeoutMs", "initialState", "calls"],
 };
 
 /**
@@ -245,6 +264,25 @@ export function validateCases(layer: LayerConfig, groups: CaseGroup[]): string[]
       lintExpectRegexes(cs.forbid, at, problems);
       lintExpectRegexes(cs.require, at, problems);
       for (const turn of cs.conversation || []) lintExpectRegexes(turn?.expect, at, problems);
+      // Pre-flight the layer's input contract on the REF FORM in YAML — zero
+      // model calls, catches an absent/inline system prompt before a token is
+      // spent. Run time re-checks the resolved bytes (a builder that prints
+      // nothing), which validate cannot see.
+      for (const p of lintInputsContract(layer, cs, at)) problems.push(p);
+      // Un-skip enforcement for ingested rows. A skipped stub is fine (it is
+      // reported as UNVERIFIED, not a pass). But the moment a reviewer removes
+      // `skip:`, the case must be actually finished: no TODO markers left, and
+      // it must carry an assertion. This is what stops a 275-row backlog from
+      // being un-skipped into 275 vacuous green ticks.
+      if (isPlainObject(cs.source) && !cs.skip) {
+        const blob = JSON.stringify(cs);
+        if (/TODO/.test(blob))
+          need(false, g.file, cs, `ingested case still has TODO markers but is no longer skipped — finish the rubric/rules or restore skip:`);
+        if (layer.kind === "llm" && !cs.expect && !cs.conversation)
+          need(false, g.file, cs, `ingested llm case has no 'expect' — an assertion-less case is a vacuous pass; add expect: or keep skip:`);
+        if (layer.kind === "judge" && !cs.rubric)
+          need(false, g.file, cs, `ingested judge case has no 'rubric' — add one or keep skip:`);
+      }
       for (const key of Object.keys(cs))
         if (!allowed.has(key))
           problems.push(
@@ -252,7 +290,17 @@ export function validateCases(layer: LayerConfig, groups: CaseGroup[]): string[]
           );
       switch (layer.kind) {
         case "static":
-          need(cs.file || cs.files, g.file, cs, "needs 'file' or 'files'");
+          need(cs.file || cs.files || cs.compare, g.file, cs, "needs 'file', 'files' or 'compare'");
+          if (cs.compare) {
+            // A compare case has no glob, so a file-mode key next to it would
+            // apply to nothing — the assertion silently pointed at the wrong
+            // target, the exact bug class compare exists to catch. Reject it.
+            const clash = STATIC_FILE_KEYS.filter((k) => k in cs);
+            if (clash.length)
+              need(false, g.file, cs, `'compare' cannot be combined with ${clash.join(", ")} — a compare case has no file glob, so those would apply to nothing. Split into two cases.`);
+            const spec = normalizeCompareSpec(cs.compare, at);
+            if (Array.isArray(spec)) for (const p of spec) problems.push(p);
+          }
           break;
         case "exec":
           need(cs.command, g.file, cs, "needs 'command'");
@@ -263,10 +311,12 @@ export function validateCases(layer: LayerConfig, groups: CaseGroup[]): string[]
         case "llm":
           need(cs.prompt || cs.messages || cs.conversation, g.file, cs, "needs 'prompt', 'messages' or 'conversation'");
           break;
-        case "dispatch":
-          need(cs.module, g.file, cs, "needs 'module' (path to the reducer, relative to this file)");
+        case "dispatch": {
+          const modeProblem = checkDispatchMode(cs);
+          if (modeProblem) need(false, g.file, cs, modeProblem);
           need(Array.isArray(cs.calls) && cs.calls.length, g.file, cs, "needs a non-empty 'calls' array");
           break;
+        }
         case "judge":
           need(Array.isArray(cs.rubric) && cs.rubric.length, g.file, cs, "needs a non-empty 'rubric'");
           need(cs.input || cs.output || cs.transcript, g.file, cs, "needs 'input' (subject call), 'output' or 'transcript'");

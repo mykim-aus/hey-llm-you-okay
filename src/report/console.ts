@@ -59,6 +59,9 @@ export function printLayer(layer: LayerRunResult, verbose: boolean): void {
       console.log(`  ${MARK.fail} ${c.bold(r.name)}${scoreTag}`);
       for (const f of r.result.failures.slice(0, 6))
         console.log(`      ${c.red("↳")} ${f.path ? c.dim(f.path + ": ") : ""}${f.message}`);
+      // compareReport is primary content (the size/section summary leads it), so
+      // print it HEAD-first and undimmed — unlike outputTail scrollback.
+      if (r.result.compareReport) console.log(indent(r.result.compareReport, 6));
       if (r.result.outputTail) console.log(c.dim(indent(r.result.outputTail.slice(-1200), 6)));
     }
     if (verbose && r.result.votes?.length) {
@@ -118,11 +121,65 @@ export function printSummary(summary: RunSummary, verbose = false): void {
     );
     console.log("");
   }
+  printSpend(summary, verbose);
   const total = summary.layers.reduce((s, l) => s + l.cases.length, 0);
-  const passed = summary.layers.reduce((s, l) => s + l.cases.filter((r) => r.result.ok).length, 0);
+  // Skipped cases are NOT passes. Counting them as such is how an ingested
+  // 275-row backlog would print "275/275 PASS" having verified nothing — the
+  // same lie, one level up from the case list.
+  const skipped = summary.layers.reduce((s, l) => s + l.cases.filter((r) => r.result.skipped).length, 0);
+  const passed = summary.layers.reduce(
+    (s, l) => s + l.cases.filter((r) => r.result.ok && !r.result.skipped).length,
+    0
+  );
   const verdict = summary.ok ? c.green("PASS") : c.red("FAIL");
   const warn = summary.layers.filter((l) => !l.ok && !l.gate).length;
   console.log(
-    `${c.bold("RESULT:")} ${verdict} — ${passed}/${total} cases, ${summary.layers.length} layers${warn ? c.yellow(` (${warn} non-gated layer(s) failing)`) : ""} ${c.dim(ms(summary.durationMs))}${summary.profile ? c.dim(` [profile: ${summary.profile}]`) : ""}`
+    `${c.bold("RESULT:")} ${verdict} — ${passed}/${total} cases${skipped ? c.yellow(` (${skipped} skipped, unverified)`) : ""}, ${summary.layers.length} layers${warn ? c.yellow(` (${warn} non-gated layer(s) failing)`) : ""} ${c.dim(ms(summary.durationMs))}${summary.profile ? c.dim(` [profile: ${summary.profile}]`) : ""}`
   );
+}
+
+const nf = (n: number) => n.toLocaleString("en-US");
+
+/**
+ * Token spend. Suppressed entirely on a static-only run (no `usage` key). The
+ * caveat lines are the honesty, not a verbose extra: whenever a call went
+ * unmetered or reported no split, the totals are a FLOOR and the `≥` prefix
+ * plus the ⚠ lines say so — a number that looks exact when it is not is the
+ * same failure class this tool exists to catch.
+ */
+export function printSpend(summary: RunSummary, verbose: boolean): void {
+  const u = summary.usage;
+  if (!u) return;
+  if (u.inputTokens === 0 && u.outputTokens === 0 && u.totalTokens === 0) {
+    console.log(
+      c.dim(
+        `TOKENS: not reported — no provider returned usage (command providers never do)`
+      )
+    );
+    console.log("");
+    return;
+  }
+  const floor = u.unmetered > 0 || u.unsplit > 0;
+  const ge = floor ? "≥" : "";
+  console.log(
+    `${c.bold("TOKENS:")} ${ge}${nf(u.inputTokens)} in · ${ge}${nf(u.outputTokens)} out · ${nf(u.calls)} calls` +
+      (u.reasoningTokens ? c.dim(` (${nf(u.reasoningTokens)} reasoning)`) : "")
+  );
+  if (u.unmetered > 0) {
+    const kinds = [...new Set(u.buckets.filter((b) => b.unmetered > 0).map((b) => `${b.provider}/${b.kind}`))].join(", ");
+    console.log(c.yellow(`  ⚠ ${u.unmetered} of ${u.calls} call(s) reported no usage (${kinds}) — the numbers above are a FLOOR`));
+  }
+  if (u.unsplit > 0)
+    console.log(c.yellow(`  ⚠ ${u.unsplit} call(s) reported only a total, with no input/output split`));
+  if (verbose && u.buckets.length) {
+    console.log(c.dim("◆ per provider"));
+    for (const b of u.buckets)
+      console.log(
+        c.dim(
+          `  ${b.provider}${b.model ? ` ${b.model}` : ""}  ${nf(b.calls)} calls  ${nf(b.inputTokens)} in  ${nf(b.outputTokens)} out` +
+            (b.unmetered ? `  (${b.unmetered} unmetered)` : "")
+        )
+      );
+  }
+  console.log("");
 }

@@ -6,7 +6,7 @@
  * normal case file: version-controlled, reviewed in PRs, and run on every
  * subsequent `heyllm run` forever.
  */
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import YAML from "yaml";
 import { glob } from "./util.js";
@@ -41,36 +41,33 @@ export async function captureCase(
 
   // A missing ledger is fine (first capture). A MALFORMED ledger must abort —
   // silently starting a fresh doc would overwrite the whole captured corpus.
-  let doc: { kind?: string; cases: CaseDef[] };
+  // parseDocument (not parse+stringify) so a reviewer's comments — "# confirmed
+  // with CS, root cause is the retrieval prompt" — survive the round trip.
   let raw: string | null = null;
   try {
     raw = await readFile(file, "utf8");
   } catch (e: any) {
     if (e.code !== "ENOENT") throw new Error(`cannot read ledger ${relFile}: ${e.message}`);
   }
+  let doc: any;
   if (raw === null) {
-    doc = { kind: layer.kind, cases: [] };
+    doc = YAML.parseDocument("cases: []\n");
   } else {
-    let parsed: any;
-    try {
-      parsed = YAML.parse(raw);
-    } catch (e: any) {
-      throw new Error(
-        `ledger ${relFile} is not valid YAML (${e.message}) — fix it before capturing, refusing to overwrite ${raw.length} bytes`
-      );
-    }
-    doc = parsed || { kind: layer.kind, cases: [] };
-    if (!Array.isArray(doc.cases)) {
-      if (parsed && Object.keys(parsed).length)
-        throw new Error(`ledger ${relFile} has no 'cases' array — refusing to overwrite it`);
-      doc.cases = [];
+    doc = YAML.parseDocument(raw);
+    if (doc.errors?.length)
+      throw new Error(`ledger ${relFile} is not valid YAML — fix it before capturing, refusing to overwrite ${raw.length} bytes`);
+    const casesNode = doc.get("cases");
+    if (!casesNode) {
+      if (raw.trim()) throw new Error(`ledger ${relFile} has no 'cases' array — refusing to overwrite it`);
+      doc.set("cases", doc.createNode([]));
     }
   }
+  const cases: CaseDef[] = (doc.get("cases")?.toJSON() as CaseDef[]) || [];
 
   const today = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-  const seq = doc.cases.filter((c) => c.name?.startsWith(`captured-${today}`)).length + 1;
+  const seq = cases.filter((c) => c.name?.startsWith(`captured-${today}`)).length + 1;
   const caseName = opts.name || `captured-${today}-${String(seq).padStart(2, "0")}`;
-  if (doc.cases.some((c) => c.name === caseName))
+  if (cases.some((c) => c.name === caseName))
     throw new Error(`case '${caseName}' already exists in ${relFile}`);
 
   const entry: CaseDef = {
@@ -81,10 +78,13 @@ export async function captureCase(
     ...(capture.defaults || {}),
     ...(layer.kind === "judge" ? { input: { prompt: input } } : { prompt: input }),
   };
-  doc.cases.push(entry);
+  doc.get("cases").add(doc.createNode(entry));
 
   await mkdir(path.dirname(file), { recursive: true });
-  await writeFile(file, YAML.stringify(doc));
+  // atomic: a crash mid-write must never leave a half-rewritten reviewed corpus
+  const tmp = `${file}.${process.pid}.tmp`;
+  await writeFile(tmp, doc.toString());
+  await rename(tmp, file);
 
   // A captured case that no include glob matches would never run — the whole
   // point of the ledger. Verify reachability and report it to the caller.

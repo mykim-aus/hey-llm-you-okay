@@ -26,6 +26,7 @@ import type {
   ToolCall,
 } from "../types.js";
 import { ProviderError, callProvider, deepGet, interpolateDeep, resolveRef } from "../util.js";
+import { checkInputContract } from "../inputs.js";
 import { runDispatchBlock } from "./dispatch.js";
 
 const toArr = (v: unknown): string[] => (v === undefined ? [] : Array.isArray(v) ? v : [v as string]);
@@ -314,6 +315,11 @@ export async function produceLlm(
 export async function runLlmCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult> {
   const provider = ctx.providers[ctx.layer.provider as string];
   const inputs = await resolveLlmInputs(cs, ctx);
+  // Before any paid call: is the case sending what this layer's contract claims,
+  // and did a declared system ref actually resolve to something? A miss here is
+  // a hard failure that costs zero tokens.
+  const contract = checkInputContract(cs, inputs, ctx.layer);
+  if (contract.length) return { ok: false, failures: contract };
   const repeat = cs.repeat ?? ctx.layer.repeat ?? 1;
   const passRate = cs.passRate ?? ctx.layer.passRate ?? 1;
   const maxRounds = cs.maxRounds ?? 3;

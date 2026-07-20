@@ -3,9 +3,29 @@
  * Covers OpenAI, Ollama (http://localhost:11434/v1), LM Studio, vLLM, Groq…
  * `apiKeyEnv` is optional — local servers usually need none.
  */
-import type { ChatRequest, ChatResponse, ProviderConfig, ToolCall } from "../types.js";
+import type { ChatRequest, ChatResponse, ProviderConfig, TokenUsage, ToolCall } from "../types.js";
 import { postJson } from "../util.js";
 import { requireKey } from "./index.js";
+
+// OpenAI shape: {prompt_tokens, completion_tokens, total_tokens,
+// completion_tokens_details?.reasoning_tokens}. completion_tokens ALREADY
+// includes reasoning — record it for visibility but never add it back or the
+// output count double-counts. Absent on some vLLM/LM Studio builds; a
+// total-only response is preserved (the rollup flags it as unsplit).
+function readUsage(u: any): TokenUsage | undefined {
+  if (!u || typeof u !== "object") return undefined;
+  const input = u.prompt_tokens,
+    output = u.completion_tokens,
+    total = u.total_tokens;
+  if (input === undefined && output === undefined && total === undefined) return undefined;
+  const reasoning = u.completion_tokens_details?.reasoning_tokens;
+  return {
+    ...(input !== undefined ? { inputTokens: input } : {}),
+    ...(output !== undefined ? { outputTokens: output } : {}),
+    ...(total !== undefined ? { totalTokens: total } : {}),
+    ...(reasoning ? { reasoningTokens: reasoning } : {}),
+  };
+}
 
 const safeParse = (s: unknown): Record<string, unknown> => {
   try {
@@ -75,7 +95,7 @@ export function openaiCompat(cfg: ProviderConfig, name: string) {
         name: tc.function?.name,
         args: safeParse(tc.function?.arguments),
       }));
-      return { text: msg.content || "", toolCalls, raw: out };
+      return { text: msg.content || "", toolCalls, raw: out, usage: readUsage(out.usage) };
     },
   };
 }

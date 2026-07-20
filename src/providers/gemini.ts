@@ -3,7 +3,28 @@
  * Tool `parameters` pass through verbatim — supply Gemini-flavored schemas
  * (uppercase TYPE enums) when targeting Gemini.
  */
-import type { ChatRequest, ChatResponse, ProviderConfig, ToolCall } from "../types.js";
+import type { ChatRequest, ChatResponse, ProviderConfig, TokenUsage, ToolCall } from "../types.js";
+
+// Gemini shape: {promptTokenCount, candidatesTokenCount?, totalTokenCount,
+// thoughtsTokenCount?}. The trap: on thinking models thoughtsTokenCount is
+// reported SEPARATELY (not inside candidatesTokenCount) yet bills at the output
+// rate, so it is ADDED to output — a count-correctness fix. candidatesTokenCount
+// can be absent on a pure functionCall response. total is taken verbatim.
+function readUsage(u: any): TokenUsage | undefined {
+  if (!u || typeof u !== "object") return undefined;
+  const input = u.promptTokenCount,
+    cand = u.candidatesTokenCount,
+    thoughts = u.thoughtsTokenCount,
+    total = u.totalTokenCount;
+  if (input === undefined && cand === undefined && total === undefined) return undefined;
+  const output = cand !== undefined || thoughts !== undefined ? (cand ?? 0) + (thoughts ?? 0) : undefined;
+  return {
+    ...(input !== undefined ? { inputTokens: input } : {}),
+    ...(output !== undefined ? { outputTokens: output } : {}),
+    ...(total !== undefined ? { totalTokens: total } : {}),
+    ...(thoughts ? { reasoningTokens: thoughts } : {}),
+  };
+}
 import { isPlainObject, postJson } from "../util.js";
 import { requireKey } from "./index.js";
 
@@ -72,7 +93,7 @@ export function gemini(cfg: ProviderConfig, name: string) {
             signature: p.thoughtSignature, // must be echoed back (Gemini 3)
           });
       }
-      return { text, toolCalls, raw: out };
+      return { text, toolCalls, raw: out, usage: readUsage(out.usageMetadata) };
     },
   };
 }

@@ -55,8 +55,14 @@ export function startMockLLM() {
         const messages = payload.messages || [];
         const sys = messages.find((m) => m.role === "system")?.content || "";
         const lastUser = [...messages].reverse().find((m) => m.role === "user")?.content || "";
-        const reply = (content, toolCalls) =>
-          send(200, {
+        const reply = (content, toolCalls) => {
+          // Deterministic usage derived from payload/reply sizes, unless the
+          // scenario opted out (state.omitUsage) — so the metering path is the
+          // one under continuous test, and an omit-usage case exercises the
+          // unmetered path.
+          const inTok = Math.ceil(JSON.stringify(messages).length / 4);
+          const outTok = Math.ceil(((content ?? "") + JSON.stringify(toolCalls ?? "")).length / 4);
+          return send(200, {
             id: "mock",
             model: payload.model,
             choices: [
@@ -66,7 +72,11 @@ export function startMockLLM() {
                 finish_reason: toolCalls ? "tool_calls" : "stop",
               },
             ],
+            ...(state.omitUsage
+              ? {}
+              : { usage: { prompt_tokens: inTok, completion_tokens: outTok, total_tokens: inTok + outTok } }),
           });
+        };
 
         // judge mode
         if (lastUser.includes("[RUBRIC]")) {

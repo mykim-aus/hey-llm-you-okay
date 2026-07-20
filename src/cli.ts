@@ -18,6 +18,8 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { captureCase } from "./capture.js";
+import { ingestCases, parseRows } from "./ingest.js";
+import { censusSystemSources, formatSystemCensus } from "./inputs.js";
 import { loadLedger, runAxisSpread, sameEvidenceDifferentScore } from "./ledger.js";
 import { ConfigError, loadConfig, loadLayerCases, validateCases } from "./config.js";
 import { printSummary } from "./report/console.js";
@@ -46,6 +48,8 @@ const BOOL_FLAGS = new Set([
   "help",
   "version",
   "no-color",
+  "dry-run",
+  "skip-invalid",
 ]);
 
 /** Flags that REQUIRE a value — a bare `--grep` must error, never silently
@@ -62,6 +66,12 @@ const VALUE_FLAGS = new Set([
   "note",
   "layer",
   "max-spread",
+  "map",
+  "source-name",
+  "out",
+  "dedup",
+  "dedup-threshold",
+  "limit",
 ]);
 
 class UsageError extends Error {}
@@ -69,18 +79,27 @@ class UsageError extends Error {}
 interface Argv {
   cmd: string;
   pos: string[];
-  flags: Record<string, string | boolean>;
+  flags: Record<string, string | boolean | string[]>;
 }
 
+// Flags that may appear more than once collect into an array. `--map` is the
+// only one — parseArgs would otherwise let a second `--map` silently overwrite
+// the first, so `ingest --map input=a --map expected=b` would drop the input.
+const REPEATABLE = new Set(["map"]);
+
 function parseArgs(argv: string[]): Argv {
-  const flags: Record<string, string | boolean> = {};
+  const flags: Record<string, string | boolean | string[]> = {};
+  const set = (key: string, value: string | boolean) => {
+    if (REPEATABLE.has(key)) (flags[key] = (flags[key] as string[]) || []).push(value as string);
+    else flags[key] = value;
+  };
   const pos: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith("--")) {
       const eq = a.indexOf("=");
       if (eq !== -1) {
-        flags[a.slice(2, eq)] = a.slice(eq + 1);
+        set(a.slice(2, eq), a.slice(eq + 1));
       } else {
         const key = a.slice(2);
         const next = argv[i + 1];
@@ -88,7 +107,7 @@ function parseArgs(argv: string[]): Argv {
         else if (next === undefined || next.startsWith("--")) {
           if (VALUE_FLAGS.has(key)) throw new UsageError(`--${key} requires a value`);
           flags[key] = true;
-        } else flags[key] = argv[++i];
+        } else set(key, argv[++i]);
       }
     } else {
       pos.push(a);
@@ -98,7 +117,7 @@ function parseArgs(argv: string[]): Argv {
   return { cmd, pos, flags };
 }
 
-const list = (v: string | boolean | undefined): string[] | undefined =>
+const list = (v: string | boolean | string[] | undefined): string[] | undefined =>
   typeof v === "string" ? v.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
 
 async function cmdRun(argv: Argv, forceTriage = false): Promise<number> {
@@ -173,7 +192,16 @@ async function cmdValidate(argv: Argv): Promise<number> {
     const count = groups.reduce((s, g) => s + g.cases.length, 0);
     total += count;
     problems = problems.concat(validateCases(layer, groups));
-    console.log(`${c.green("✓")} layer ${c.bold(layer.name)} (${layer.kind}) — ${count} cases`);
+    // Census: for llm/judge layers, report WHERE each case's system prompt comes
+    // from. A fact, never a verdict — no colour, no threshold, exit untouched —
+    // so it can never become noise people learn to ignore. "N absent" on a
+    // routing layer IS the whole finding from the real incident, printed unasked.
+    let census = "";
+    if (layer.kind === "llm" || layer.kind === "judge") {
+      const cases = groups.flatMap((g) => g.cases);
+      census = c.dim(` · system: ${formatSystemCensus(censusSystemSources(layer.kind, cases))}`);
+    }
+    console.log(`${c.green("✓")} layer ${c.bold(layer.name)} (${layer.kind}) — ${count} cases${census}`);
   }
   if (problems.length) {
     console.log("");
@@ -263,6 +291,74 @@ async function cmdCapture(argv: Argv): Promise<number> {
     console.log(c.yellow("    the captured case will never run until you add it to that layer's include globs."));
   }
   return 0;
+}
+
+async function cmdIngest(argv: Argv): Promise<number> {
+  const src = argv.pos[0];
+  if (!src) {
+    console.error("usage: heyllm ingest <file.jsonl|-> --map input=<path> [--map expected=<path>] [--map id=<path>] [--source-name s] [--out f] [--dedup near] [--dry-run] [--skip-invalid]");
+    return 2;
+  }
+  const config = await loadConfig(argv.flags.config as string, { profile: argv.flags.profile as string });
+
+  // --map input=a.b.c → { input: "a.b.c" }
+  const mapEntries = (Array.isArray(argv.flags.map) ? argv.flags.map : argv.flags.map ? [argv.flags.map as string] : []) as string[];
+  const map: Record<string, string> = {};
+  for (const m of mapEntries) {
+    const eq = m.indexOf("=");
+    if (eq === -1) {
+      console.error(`--map must be field=path, got '${m}'`);
+      return 2;
+    }
+    map[m.slice(0, eq).trim()] = m.slice(eq + 1).trim();
+  }
+
+  const text = src === "-" ? await readStdin() : await readFileText(path.resolve(src));
+  let rows;
+  try {
+    rows = parseRows(text);
+  } catch (e: any) {
+    console.error(c.red(`ingest: ${e.message}`));
+    return 2;
+  }
+
+  let res;
+  try {
+    res = await ingestCases(config, rows, {
+      map,
+      sourceName: argv.flags["source-name"] as string,
+      layer: argv.flags.layer as string,
+      out: argv.flags.out as string,
+      dedup: argv.flags.dedup as "exact" | "near",
+      dedupThreshold: argv.flags["dedup-threshold"] ? Number(argv.flags["dedup-threshold"]) : undefined,
+      dryRun: !!argv.flags["dry-run"],
+      skipInvalid: !!argv.flags["skip-invalid"],
+      limit: argv.flags.limit ? Number(argv.flags.limit) : undefined,
+    });
+  } catch (e: any) {
+    console.error(c.red(`ingest: ${e.message}`));
+    return 2;
+  }
+
+  console.log(
+    `${res.dryRun ? c.yellow("[dry-run] ") : c.green("✓ ")}${rows.length} rows → ${c.bold(String(res.newCases))} new · ${res.duplicateInBatch} duplicate-in-batch · ${res.alreadyInLedger} already in ledger` +
+      (res.invalidDropped ? c.yellow(` · ${res.invalidDropped} invalid dropped`) : "")
+  );
+  if (res.newCases && !res.dryRun) {
+    console.log(c.dim(`  → ${res.file} (layer: ${res.layer})`));
+    console.log(c.dim("  every case is skip:ped and TODO-marked — reported as UNVERIFIED until you fill in its rubric and remove skip:"));
+  }
+  return 0;
+}
+
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+  return Buffer.concat(chunks).toString("utf8");
+}
+async function readFileText(p: string): Promise<string> {
+  const { readFile } = await import("node:fs/promises");
+  return readFile(p, "utf8");
 }
 
 const INIT_CONFIG = `# heyllm.yaml — hey LLM, you okay? LLM test pyramid for CI/CD
@@ -387,6 +483,7 @@ commands:
   validate   lint config + case files without executing
   doctor     read the run-axis ledger: which rubric items can be trusted (no model calls)
   capture    append a real-world input to the golden corpus ledger
+  ingest     bulk-import a complaint export (JSONL) into the corpus as reviewable stubs
   init       scaffold heyllm.yaml + example tests
 
 common flags:
@@ -426,6 +523,8 @@ export async function main(argv: string[]): Promise<number> {
         return await cmdValidate(parsed);
       case "capture":
         return await cmdCapture(parsed);
+      case "ingest":
+        return await cmdIngest(parsed);
       case "doctor":
         return await cmdDoctor(parsed);
       case "init":

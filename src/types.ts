@@ -48,10 +48,48 @@ export interface ChatRequest {
   json?: boolean;
 }
 
+export interface TokenUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  /** reasoning/thinking tokens, for visibility. Already inside outputTokens on
+   *  OpenAI/Anthropic; on Gemini it is reported separately and folded into
+   *  output by the adapter (a count-correctness fix, not pricing). */
+  reasoningTokens?: number;
+}
+
 export interface ChatResponse {
   text: string;
   toolCalls: ToolCall[];
   raw: unknown;
+  usage?: TokenUsage;
+}
+
+export interface UsageBucket {
+  provider: string;
+  model?: string;
+  kind: ProviderKind;
+  calls: number;
+  /** calls whose provider reported no usage at all */
+  unmetered: number;
+  /** calls that reported only a total, no input/output split */
+  unsplit: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
+export interface UsageTotals {
+  calls: number;
+  unmetered: number;
+  unsplit: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  reasoningTokens?: number;
+  /** false ⇒ some call went unmetered or unsplit, so in/out sums are a FLOOR */
+  complete: boolean;
+  buckets: UsageBucket[];
 }
 
 export interface Provider {
@@ -133,11 +171,22 @@ export interface ReliabilityConfig {
 }
 
 /** How a model response is folded into application state. */
+/** Exactly one of `module` (JS) or `command` (any language, over a JSON pipe). */
 export interface DispatchSpec {
   /** path to a module exporting the reducer, relative to the case file */
-  module: string;
+  module?: string;
   /** named export to use (default: the default export) */
   export?: string;
+  /** subprocess reducer: argv[0]. Spawned directly — no shell, no word splitting */
+  command?: string;
+  /** subprocess reducer: argv[1..] */
+  args?: string[];
+  /** subprocess reducer: working dir (default: the case file's dir) */
+  cwd?: string;
+  /** subprocess reducer: extra env vars for the child */
+  env?: Record<string, string>;
+  /** subprocess reducer: per-call timeout (default 30000) */
+  timeoutMs?: number;
   initialState?: unknown;
   expect?: Record<string, unknown>;
 }
@@ -146,8 +195,21 @@ export interface DispatchSpec {
 export type CaseDef = Record<string, any> & {
   name: string;
   tags?: string[];
-  skip?: boolean;
+  /** true, or a reason string shown as the skip note (ingested stubs use this) */
+  skip?: boolean | string;
+  /** static layer: assert two artifacts (file:/exec: refs) are the same */
+  compare?: CompareSpec;
+  /** provenance for a case bulk-imported by `heyllm ingest` */
+  source?: Record<string, unknown>;
 };
+
+export interface CompareSpec {
+  left: string;
+  right: string;
+  mode: "exact" | "normalized";
+  /** regex with one capture group naming a section; markdown auto-detected if omitted */
+  sections?: string;
+}
 
 export interface LayerConfig {
   name: string;
@@ -174,6 +236,16 @@ export interface LayerConfig {
   /** enable score-regression checks against the baseline file */
   baseline?: boolean;
   maxDrop?: number;
+  /** llm/judge — contract on where each case's system prompt must come from */
+  inputs?: InputsContract;
+}
+
+/** A claim about what every case in a layer must SEND. A test that builds its
+ *  own prompt is testing a program you do not ship — this makes the suite state,
+ *  and the tool enforce, that its cases use production's real prompt path. */
+export interface InputsContract {
+  /** required = any non-empty · file = file:/exec: ref · exec = exec: ref only */
+  system?: "required" | "file" | "exec";
 }
 
 export interface TriageSettings {
@@ -292,6 +364,10 @@ export interface CaseResult {
   output?: string;
   /** exec layer failure context */
   outputTail?: string;
+  /** static/compare — the multi-line structural report. Separate from `failures`
+   *  because the console prints only 6 one-line failures and JUnit puts the
+   *  summary in an attribute; the body goes here. */
+  compareReport?: string;
   /** llm/judge — the exact inputs sent (triage snapshots these) */
   resolvedInputs?: ResolvedLlmInputs | null;
   attemptsDetail?: AttemptResult[];
@@ -318,6 +394,8 @@ export interface CaseRunRecord {
   /** original YAML definition — triage re-runs from this */
   def: CaseDef;
   baseDir: string;
+  /** tokens this case spent (absent if it made no model calls) */
+  usage?: UsageTotals;
 }
 
 export interface LayerRunResult {
@@ -328,6 +406,8 @@ export interface LayerRunResult {
   skipped?: string;
   durationMs: number;
   cases: CaseRunRecord[];
+  /** tokens this layer spent (absent on layers that made no model calls) */
+  usage?: UsageTotals;
 }
 
 export interface RunSummary {
@@ -344,6 +424,8 @@ export interface RunSummary {
    *  is not "we asked and it was fine" — the CLI exits 2 (usage/config) on it
    *  even when every executed case passed.                                    */
   infra?: InfraProblem[];
+  /** tokens the whole run spent, incl. triage (absent on a static-only run) */
+  usage?: UsageTotals;
 }
 
 export interface InfraProblem {

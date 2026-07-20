@@ -155,6 +155,34 @@ cases:
     jsonValid: false   # or yamlValid / maxBytes
 ```
 
+#### `compare:` — is the thing you test the thing you ship?
+
+The case study's headline bug was a test helper that rebuilt the system prompt while production assembled it elsewhere; 7 sections were missing and every test stayed green. The fix is one assembly function — but nothing could *assert* the equivalence. Now something can:
+
+```yaml
+cases:
+  - name: system-prompt-matches-production
+    compare:
+      left:  "exec:node scripts/print-system-prompt.mjs"   # what production sends
+      right: file:../fixtures/system-prompt.txt            # what the tests send
+      mode: normalized        # exact | normalized (default)
+      # sections: "^#{1,6}\\s+(.+)$"   # optional; markdown headings auto-detected
+```
+
+Both sides must be `file:`/`exec:` refs (a bare path would silently compare a 15-character literal). The failure report leads with **size, line and section deltas**, then names the sections present on one side and absent from the other, then points at the first divergence — a unified diff of two 58KB prompts communicates nothing:
+
+```
+┌ compare   print-system-p… vs  system-prompt.txt  mode: normalized
+│ size         58,392 chars       53,947 chars   -4,445 (-7.6%)
+│ sections             11                  2     (auto)
+├─ only in print-system-p… (9)
+│   ✗ persona              1,102 chars   print-system-p…:31
+│   ✗ reviewVocab            431 chars   print-system-p…:145
+└ first divergence   print-system-p…:31 / system-prompt.txt:31   (byte 1,180 of 58,392)
+```
+
+`normalized` (the default) ignores trailing whitespace and blank-line runs — otherwise the very first use goes red because `resolveRef` trims `exec:` output but not `file:` text. A green compare still reports `bytesIdentical: false` so nothing is waived silently. An empty resolved side is always a failure: a builder that prints nothing verified nothing.
+
 ### `exec` — wrap anything
 
 ```yaml
@@ -236,6 +264,40 @@ cases:
     calls: [{ name: escalate_to_human }]
     expect: { state: { mode: handoff } }
 ```
+
+#### Your app isn't JavaScript? Use `command:` instead of `module:`
+
+A reducer can be **any executable in any language**. It reads one JSON request per line on stdin and writes exactly one JSON response line on stdout:
+
+```yaml
+  - name: guests-cannot-open-a-ticket
+    command: python3
+    args: [reducer.py]          # spawned directly — no shell, so no quoting traps
+    initialState: { signedIn: false, panel: null }
+    calls: [{ name: open_ticket, args: { ticketId: "T-1" } }]
+    expect: { state: { panel: null } }
+```
+
+```python
+# reducer.py — 12 lines, no framework
+import json, sys
+for line in sys.stdin:
+    req = json.loads(line)
+    if req.get("probe"): break          # heyllm's liveness check on startup
+    state, call = req["state"], req["call"]
+    if call["name"] == "open_ticket" and state.get("signedIn"):
+        state = {**state, "panel": {"kind": "ticket", "id": call["args"]["ticketId"]}}
+        print(json.dumps({"state": state, "effects": [{"type": "analytics"}]}))
+    else:
+        print(json.dumps({"state": state}))
+    sys.stdout.flush()
+```
+
+`state` is sent on **every** call, so your reducer stays a pure function of `(state, call)` and cannot leak state between an `llm` case's repeated attempts. The fold, the effect accumulation and every assertion stay in heyllm — identical to the JS path.
+
+> **stdout is the data channel, not a log.** Exactly one JSON line per request; send diagnostics to stderr. heyllm will not scan past a stray `print()` to find the next parseable JSON — doing so would swallow your log line as a response and go green on fabricated state. A polluted channel is a hard failure that quotes the offending line.
+>
+> Return `{"error": "no handler for X"}` to report a domain error by name — that is exactly the signal this layer exists to find. And a `command:` that cannot start fails the case even when the model produced zero tool calls, so a broken reducer is never a silent no-op.
 
 …or fold the **live** model's calls through the same reducer, so one case covers the whole chain:
 
@@ -443,10 +505,79 @@ Exit codes: `0` pass · `1` gated failure · `2` config/usage error **or an unre
 
 > **A provider we could not reach is never a pass.** If the API is down, the key is missing, or your local Ollama isn't running, those cases produced *no verdict* — so they are reported under `◆ NOT VERIFIED`, force a non-zero result even on a warn-only layer, and exit **2** rather than 1. "We never got to ask" is a different fact from "we asked and it failed", and only one of them means your prompt is broken.
 
+## What did it cost?
+
+Every run that touches a model reports its tokens, right above the verdict:
+
+```
+TOKENS: 71,204 in · 1,088 out · 24 calls
+  ⚠ 6 of 24 call(s) reported no usage (local/command) — the numbers above are a FLOOR
+```
+
+That line is how you find out a suite is shipping 402 tool declarations (~67k tokens) on *every single request* before anyone opens a bill. Per-layer and per-case totals are in the JSON report; `--verbose` breaks it down per provider.
+
+**heyllm ships no price table and prints no dollar estimate.** A vendored price is right the day it ships and silently wrong forever after — the exact failure this tool exists to catch, denominated in dollars. And `openai-compatible` is the "any baseUrl" kind: it covers Ollama, vLLM and LM Studio where marginal cost is zero. Tokens are a fact the provider reports; the price is on your invoice.
+
+A call whose provider reported nothing counts as **unmetered**, never as zero — so the totals are labelled a floor rather than quietly under-reporting.
+
+## Testing what you actually ship
+
+`heyllm validate` reports where every llm/judge case's system prompt comes from:
+
+```
+✓ layer routing (llm) — 6 cases · system: 6 absent
+✓ layer behavior (llm) — 12 cases · system: 10 exec, 2 inline
+```
+
+`6 absent` on a routing layer is the whole finding: those cases send no system prompt at all while production assembles a large one. This is a census, never a verdict — no threshold, no colour, exit code untouched — so it cannot become noise you learn to ignore.
+
+To make it enforceable, a layer can declare what its cases must send:
+
+```yaml
+- name: routing
+  kind: llm
+  provider: subject
+  inputs:
+    system: exec          # required | file | exec
+```
+
+`exec` means the prompt must come from an `exec:` ref — your real builder, the code production runs. Checked at **validate** time on the ref form (before a token is spent) and again at **run** time, because `heyllm run` never calls the validator. Layer-level on purpose: the contract is a claim about the suite, so no single case can quietly exempt itself.
+
+One rule needs no opt-in: a `file:`/`exec:` system ref that **resolves to zero bytes** always fails. There is no legitimate reading of "I asked this ref for a prompt and got nothing."
+
+## Growing the corpus in bulk
+
+`heyllm capture` takes one complaint. `heyllm ingest` takes the whole export:
+
+```bash
+jq -c '.[]' zendesk-export.json > rows.jsonl        # any store; Sentry/Intercom/psql too
+heyllm ingest rows.jsonl \
+  --map input=comment.body \
+  --map expected=custom_fields.expected_behavior \
+  --map id=id --source-name zendesk --dedup near --dry-run
+```
+
+```
+✓ 275 rows → 41 new · 198 duplicate-in-batch · 36 already in ledger
+```
+
+Every ingested case is written **skipped and TODO-marked**, so it reports as `○ unverified` — never as a pass:
+
+```
+▸ quality 0/41 cases (41 skipped, unverified)
+```
+
+That is the point. An assertion-less case iterates zero expectations and returns ok, so bulk-importing 275 rows without this would add 275 green ticks that verify nothing. The validator then refuses to let anyone remove `skip:` while the TODOs remain — a parked backlog keeps CI green, and finishing a row is gated on actually finishing it.
+
+Rubric skeletons use `ask: binary` (a harvested "expected behavior" is a fulfilment question, not a 1–10 judgement) and emit `rules:` as literal TODOs. **They are never machine-written**: `heyllm doctor`'s whole diagnosis — "the judges quoted the same evidence and still disagreed, so this is a missing decision rule" — is only meaningful if `rules:` is deliberate human policy.
+
+Dedup is exact-by-digest always, `--dedup near` (trigram Jaccard) opt-in — a false merge silently deletes a distinct test, which is losing coverage while believing you gained it. Merged rows keep their text in `source.mergedRaw`; provenance (`source.system/id/url/digest/raw`) rides with every case so a reviewer can trace back to the original ticket. Re-running the same file writes nothing.
+
 ## CLI
 
 ```
 heyllm run          run the pyramid          --only a,b --grep re --tags t1,t2
+heyllm ingest       bulk-import a JSONL export  --map input=<path> --dedup near --dry-run
 heyllm triage       run + A/B probe          --update-baseline --keep-going
 heyllm validate     lint without executing   --profile ci
 heyllm capture      grow the golden corpus   "input" --tags a,b --note ...

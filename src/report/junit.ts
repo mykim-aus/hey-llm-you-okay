@@ -23,10 +23,14 @@ export async function writeJunitReport(summary: RunSummary, file: string): Promi
           if (r.result.ok) return `    <testcase name="${name}" time="${time}"/>`;
           const t = triageFor(l.name, r.name);
           const msg = r.result.failures.map((f) => `${f.path ? f.path + ": " : ""}${f.message}`).join("\n");
+          // The compare report is element BODY (legal, multi-line) — an attribute
+          // could only hold the one-line summary, leaving JUnit-only CI with no
+          // report at all.
+          const compareBody = r.result.compareReport ? `\n\n${r.result.compareReport}` : "";
           const triageNote = t ? `\n[TRIAGE] ${t.verdict}: ${t.reason}` : "";
           return `    <testcase name="${name}" time="${time}"><failure message="${xmlEscape(
             r.result.failures[0]?.message || "failed"
-          )}">${xmlEscape(msg + triageNote)}</failure></testcase>`;
+          )}">${xmlEscape(msg + compareBody + triageNote)}</failure></testcase>`;
         })
         .join("\n");
       return `  <testsuite name="${xmlEscape(l.name)}" tests="${l.cases.length}" failures="${failures}" skipped="${skipped}" time="${(l.durationMs / 1000).toFixed(3)}">\n${cases}\n  </testsuite>`;

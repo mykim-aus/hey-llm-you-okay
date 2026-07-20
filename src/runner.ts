@@ -26,6 +26,7 @@ import {
   saveBaseline,
 } from "./baseline.js";
 import { triageFailures } from "./triage.js";
+import { TokenMeter, summarizeUsage } from "./usage.js";
 import { loadLedger, recordObservation, saveLedger } from "./ledger.js";
 import type {
   CaseCtx,
@@ -76,6 +77,11 @@ export interface RunOptions {
 
 export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Promise<RunSummary> {
   const log = opts.log ?? (() => {});
+  // One meter per run (never module-global — that would cross-count concurrent
+  // runs). Cases get a scoped provider view via makeCtx, so every chat call —
+  // including triage arms — is attributed without threading usage through eight
+  // call signatures where a new path could silently escape metering.
+  const meter = new TokenMeter();
   const providers = createProviders(config.providers);
   const startedAt = new Date();
   const layerResults: LayerRunResult[] = [];
@@ -89,7 +95,12 @@ export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Pro
   const maxDrop = config.settings.maxDrop ?? 1;
   let gateBroken = false;
 
-  const makeCtx = (layer: LayerConfig, baseDir: string, saved: Record<string, unknown> = {}): CaseCtx => {
+  const makeCtx = (
+    layer: LayerConfig,
+    baseDir: string,
+    saved: Record<string, unknown> = {},
+    scope: { case?: string; phase?: "run" | "triage" } = {}
+  ): CaseCtx => {
     // Only the env vars a layer DECLARES are interpolatable — never all of
     // process.env (prompt pollution + secrets leaking into the baseline).
     const envScope = Object.fromEntries(
@@ -97,7 +108,9 @@ export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Pro
     );
     return {
       layer,
-      providers,
+      // scoped provider view: each case holds its own closure, so concurrent
+      // cases record their tokens against themselves with no interleaving.
+      providers: meter.scope({ layer: layer.name, case: scope.case, phase: scope.phase ?? "run" }, providers),
       baseDir,
       saved,
       lookup: makeLookup(envScope, layer.vars, saved),
@@ -188,7 +201,7 @@ export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Pro
       if (def.skip) {
         result = { ok: true, failures: [], skipped: typeof def.skip === "string" ? def.skip : "skipped" };
       } else {
-        const ctx = makeCtx(layer, baseDir, saved);
+        const ctx = makeCtx(layer, baseDir, saved, { case: def.name });
         try {
           result = await RUNNERS[layer.kind](def, ctx);
         } catch (e: any) {
@@ -228,6 +241,8 @@ export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Pro
         result,
         def,
         baseDir,
+        // absent key (not an all-zero object) when the case made no model calls
+        ...(meter.hasCalls(layer.name, def.name) ? { usage: summarizeUsage(meter.forCase(layer.name, def.name)) } : {}),
       };
       opts.onCase?.(layer, record);
       return record;
@@ -260,6 +275,7 @@ export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Pro
       ok,
       durationMs: Date.now() - started,
       cases: records,
+      ...(meter.hasCalls(layer.name) ? { usage: summarizeUsage(meter.forLayer(layer.name)) } : {}),
     });
     if (!ok && layer.gate) gateBroken = true;
   }
@@ -305,9 +321,14 @@ export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Pro
     });
     if (failed.length) {
       log(`entering triage mode for ${failed.length} failed AI case(s)…`);
-      summary.triage = await triageFailures(config, providers, failed, (layer, baseDir) => makeCtx(layer, baseDir), log);
+      // phase: "triage" so the A/B probe's own token spend is counted and
+      // attributed as triage, not folded into the original run silently.
+      summary.triage = await triageFailures(config, providers, failed, (layer, baseDir) => makeCtx(layer, baseDir, {}, { phase: "triage" }), log);
     }
   }
+
+  // Computed AFTER triage, so triage's own spend is in the run total.
+  if (meter.hasCalls()) summary.usage = summarizeUsage(meter.all());
 
   return summary;
 }

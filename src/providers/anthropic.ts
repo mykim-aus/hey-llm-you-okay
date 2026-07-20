@@ -1,7 +1,24 @@
 /**
  * Anthropic Messages API adapter.
  */
-import type { ChatRequest, ChatResponse, ProviderConfig, ToolCall } from "../types.js";
+import type { ChatRequest, ChatResponse, ProviderConfig, TokenUsage, ToolCall } from "../types.js";
+
+// Anthropic shape: {input_tokens, output_tokens, cache_read_input_tokens?,
+// cache_creation_input_tokens?}. input_tokens EXCLUDES the cache fields; heyllm
+// never sends cache_control so they are normally absent. We do not fold them
+// in — they bill at different multipliers and folding would corrupt any later
+// cost math. total is reconstructed since the API does not send one.
+function readUsage(u: any): TokenUsage | undefined {
+  if (!u || typeof u !== "object") return undefined;
+  const input = u.input_tokens,
+    output = u.output_tokens;
+  if (input === undefined && output === undefined) return undefined;
+  return {
+    ...(input !== undefined ? { inputTokens: input } : {}),
+    ...(output !== undefined ? { outputTokens: output } : {}),
+    totalTokens: (input ?? 0) + (output ?? 0),
+  };
+}
 import { postJson } from "../util.js";
 import { requireKey } from "./index.js";
 
@@ -87,7 +104,7 @@ export function anthropic(cfg: ProviderConfig, name: string) {
       // contract. Unwrapping here means `json: true` behaves the same on every
       // provider, which is the only reason the option is worth having.
       if (wantsJson) text = stripJsonFence(text);
-      return { text, toolCalls, raw: out };
+      return { text, toolCalls, raw: out, usage: readUsage(out.usage) };
     },
   };
 }

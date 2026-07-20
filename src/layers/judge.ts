@@ -51,6 +51,7 @@ import {
 } from "../util.js";
 import { itemFingerprint, itemKey, runAxisSpread, shortHash } from "../ledger.js";
 import { produceLlm, resolveLlmInputs } from "./llm.js";
+import { InputContractError, checkInputContract } from "../inputs.js";
 
 type FullRubric = RubricItem & { weight: number; ask: "scale" | "binary" };
 
@@ -162,6 +163,11 @@ async function getSubjectOutput(cs: CaseDef, ctx: CaseCtx): Promise<SubjectOutpu
   }
   const subject = ctx.providers[ctx.layer.subject as string];
   const inputs = await resolveLlmInputs(cs.input, ctx);
+  // The input contract applies only to cases that generate from a subject; an
+  // output:/transcript: case has no subject prompt and returned above. A miss
+  // must precede the (paid) subject call.
+  const contract = checkInputContract(cs, inputs, ctx.layer);
+  if (contract.length) throw new InputContractError(contract.map((f) => f.message).join("; "));
   const out = await produceLlm(subject, inputs, { maxRounds: cs.input.maxRounds ?? 3 });
   const output = out.lastText || out.text;
   if (!output.trim() && out.unanswered.length)
@@ -274,6 +280,10 @@ export async function runJudgeCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResul
   try {
     subject = await getSubjectOutput(cs, ctx);
   } catch (e: any) {
+    // A contract miss is not "producing output failed" — the subject never ran,
+    // and calling it a subject error would misattribute the fix.
+    if (e instanceof InputContractError)
+      return { ok: false, failures: [{ path: "inputs.system", message: e.message }] };
     return {
       ok: false,
       failures: [
