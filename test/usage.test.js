@@ -89,3 +89,33 @@ layers:
   assert.equal(s.usage, undefined, "no model calls ⇒ no usage key at all");
   assert.equal(s.layers[0].usage, undefined);
 });
+
+// ── regressions from the 0.1.8 adversarial audit ─────────────────────────────
+
+test("REGRESSION: non-numeric usage values never reach the totals", () => {
+  // A provider returning strings used to be concatenated: "012001200 in".
+  const t = summarizeUsage([ev({ inputTokens: "1200", outputTokens: "12", totalTokens: "1212" })]);
+  assert.equal(t.inputTokens, 1200, "numeric strings are coerced, not concatenated");
+  assert.equal(typeof t.inputTokens, "number");
+  const junk = summarizeUsage([ev({ inputTokens: "n/a", outputTokens: null })]);
+  assert.equal(junk.unmetered, 1, "unparseable usage is unmetered, not a phantom 0");
+  assert.equal(junk.complete, false);
+});
+
+test("REGRESSION: a half-reported split is not 'complete' with a phantom zero", () => {
+  const t = summarizeUsage([ev({ inputTokens: 500 })]); // output absent
+  assert.equal(t.complete, false, "one half of the split is not a complete measurement");
+  assert.equal(t.unsplit, 1);
+});
+
+test("REGRESSION: a call that threw is recorded as unmetered, not omitted", async () => {
+  const { TokenMeter } = await import("../dist/usage.js");
+  const meter = new TokenMeter();
+  const failing = { name: "p", kind: "openai-compatible", model: "m", chat: async () => { throw new Error("boom"); } };
+  const scoped = meter.scope({ layer: "l", phase: "run" }, { p: failing });
+  await assert.rejects(() => scoped.p.chat({ messages: [] }));
+  const t = summarizeUsage(meter.all());
+  assert.equal(t.calls, 1, "the call happened and may have been billed");
+  assert.equal(t.unmetered, 1);
+  assert.equal(t.complete, false, "omitting failed calls used to claim a complete measurement");
+});

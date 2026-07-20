@@ -301,3 +301,41 @@ layers:
   assert.equal(summary.infra[0].case, "rate-limited");
   assert.match(summary.infra[0].message, /could not measure/);
 });
+
+test("REGRESSION: passRate cannot absorb attempts that never reached the provider", async () => {
+  // repeat: 4, passRate: 0.25 — one success and three unreachable attempts used
+  // to satisfy the ratio and report a clean PASS, for a case measured once in
+  // four. An attempt with no verdict is not a failed attempt; it is no data.
+  const { createServer } = await import("node:http");
+  let n = 0;
+  const srv = createServer((req, res) => {
+    if (++n > 1) return void req.socket.destroy();
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "hello" } }] }));
+  });
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${srv.address().port}/v1`;
+  try {
+    const dir = await project({
+      "heyllm.yaml": `
+providers:
+  m: { kind: openai-compatible, baseUrl: "${base}", model: mock, apiKeyEnv: FAKE_KEY }
+layers:
+  - name: behavior
+    kind: llm
+    provider: m
+    repeat: 4
+    passRate: 0.25
+    cases:
+      - { name: flaky, prompt: hi, expect: { text: hello } }
+`,
+    });
+    process.env.FAKE_KEY = "x";
+    const summary = await runSuite(await loadConfig(path.join(dir, "heyllm.yaml")));
+    assert.equal(summary.layers[0].cases[0].result.ok, false, "a case with 3/4 unmeasured attempts has no verdict");
+    assert.ok(summary.infra?.length, "the unreachable attempts must surface on the infra channel");
+    assert.equal(summary.ok, false);
+  } finally {
+    srv.close();
+  }
+});

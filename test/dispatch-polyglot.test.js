@@ -200,3 +200,66 @@ test("a broken command is caught even when the fold has zero calls (no silent no
   const r = caseOf(await run(dir), "zero").result;
   assert.equal(r.ok, false, "the eager liveness probe must fail before the fold");
 });
+
+// ── regressions from the 0.1.8 adversarial audit ─────────────────────────────
+
+test("REGRESSION: a reducer that STARTS then DIES is caught with zero tool calls", async () => {
+  // The probe used to resolve before the exit-code check, so it only ever caught
+  // ENOENT. A bad interpreter arg / import error / syntax error — the common
+  // real breakage — started, died, and the case passed having never run it.
+  // The previous test for this passed `calls: [{name: x}]` (non-zero) AND used a
+  // nonexistent binary, so it missed on both axes.
+  const dir = await project(LAYER(`      - name: unused
+        command: node
+        args: [reducer.cjs]
+        calls: [{ name: x }]`));
+  await writeFile(path.join(dir, "bad.sh"), `#!/bin/sh\necho "Traceback: ImportError" >&2\nexit 1\n`);
+  await chmod(path.join(dir, "bad.sh"), 0o755);
+
+  const { runDispatchBlock } = await import("../dist/layers/dispatch.js");
+  const failures = [];
+  const outcome = await runDispatchBlock(
+    { command: "./bad.sh", initialState: { screen: "home" }, expect: { state: { screen: "home" } } },
+    [], // ← ZERO tool calls: the exact state the probe exists to protect
+    { baseDir: dir, config: { baseDir: dir } },
+    failures
+  );
+  assert.ok(failures.length > 0, "a reducer that exited 1 must not produce a silent green");
+  assert.equal(outcome, null);
+  assert.match(failures[0].message, /exited 1|never/i);
+});
+
+test("REGRESSION: a dispatch: block folding ZERO calls is not a vacuous pass", async () => {
+  // With a WORKING reducer and no tool calls, `expect` was scored against the
+  // untouched initialState and passed — a green tick for a chain nothing walked.
+  const dir = await project(LAYER(`      - name: unused
+        command: node
+        args: [reducer.cjs]
+        calls: [{ name: x }]`));
+  const { runDispatchBlock } = await import("../dist/layers/dispatch.js");
+  const failures = [];
+  await runDispatchBlock(
+    { command: "node", args: ["reducer.cjs"], initialState: { screen: "home" }, expect: { state: { screen: "home" } } },
+    [],
+    { baseDir: dir, config: { baseDir: dir } },
+    failures
+  );
+  assert.ok(failures.length > 0, "zero folded calls verified nothing about the app");
+  assert.match(failures[0].message, /no tool calls/);
+});
+
+test("REGRESSION: the dispatch: block enforces the mode rules too", async () => {
+  const dir = await project(LAYER(`      - name: unused
+        command: node
+        args: [reducer.cjs]
+        calls: [{ name: x }]`));
+  const { runDispatchBlock } = await import("../dist/layers/dispatch.js");
+  const failures = [];
+  await runDispatchBlock(
+    { command: "node", module: "./r.mjs", initialState: {}, expect: {} },
+    [{ name: "x", args: {} }],
+    { baseDir: dir, config: { baseDir: dir } },
+    failures
+  );
+  assert.ok(failures.some((f) => /both 'module' and 'command'/.test(f.message)), "mode rules must apply to the embedded block");
+});

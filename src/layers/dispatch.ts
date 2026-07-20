@@ -123,7 +123,7 @@ async function spawnOnce(
   baseDir: string,
   payload: unknown,
   probe = false
-): Promise<{ line: string; stderr: string }> {
+): Promise<{ line: string; stderr: string; code?: number }> {
   const { spawn } = await import("node:child_process");
   const cwd = spec.cwd ? path.resolve(baseDir, spec.cwd) : baseDir;
   const cmd = spec.command as string;
@@ -182,7 +182,13 @@ async function spawnOnce(
       if (done) return;
       done = true;
       clearTimeout(timer);
-      if (probe) return resolve({ line: "", stderr: err });
+      // The probe does NOT short-circuit here: doing so made it blind to a
+      // child that starts and then dies (bad interpreter arg, import error,
+      // syntax error) — the most common real breakage — leaving exactly the
+      // silent no-op the probe exists to prevent. The exit code is returned to
+      // the caller, which decides (a probe-unaware reducer may legitimately
+      // exit non-zero on the probe line).
+      if (probe) return resolve({ line: "", stderr: err, code: code ?? 0 });
       if (code !== 0)
         return reject(new Error(`reducer exited ${code}${err.trim() ? ` — stderr: ${truncate(err.trim(), 300)}` : ""}`));
       const lines = out.split("\n").filter((l) => l.trim());
@@ -204,12 +210,21 @@ async function spawnOnce(
 async function spawnReducer(spec: DispatchSpec, baseDir: string): Promise<Reducer> {
   // Eager liveness probe. Without it a broken `command:` is a SILENT NO-OP when
   // the model produces zero tool calls — the fold never runs, nothing spawns,
-  // and the case passes having verified nothing. Fail here, at the same point
-  // loadReducer would have failed.
-  await spawnOnce({ ...spec, timeoutMs: Math.min(spec.timeoutMs ?? 30000, 10000) }, baseDir, { v: 1, probe: true }, true);
+  // and the case passes having verified nothing.
+  //
+  // A non-zero probe exit is NOT fatal on its own: a reducer that does not know
+  // about the probe line may legitimately die on it. So the result is retained
+  // and consulted only if the fold ends up reducing zero calls — the one case
+  // where no real spawn ever proves the reducer works.
+  const probe = await spawnOnce(
+    { ...spec, timeoutMs: Math.min(spec.timeoutMs ?? 30000, 10000) },
+    baseDir,
+    { v: 1, probe: true },
+    true
+  );
 
   let index = 0;
-  return async (state: unknown, call: DispatchCall) => {
+  const reduce = async (state: unknown, call: DispatchCall) => {
     const i = index++;
     const { line } = await spawnOnce(spec, baseDir, { v: 1, index: i, state, call });
     let parsed: any;
@@ -234,6 +249,13 @@ async function spawnReducer(spec: DispatchSpec, baseDir: string): Promise<Reduce
       throw new Error(`call[${i}] ${call.name}: 'effects' must be an array, got ${typeof parsed.effects}`);
     return { state: parsed.state, effects: parsed.effects ?? [] };
   };
+  // Surfaced by runDispatchBlock/runDispatchCase when zero calls were folded.
+  (reduce as any).probeFailure =
+    probe.code && probe.code !== 0
+      ? `the reducer exited ${probe.code} on startup and was never successfully executed` +
+        (probe.stderr.trim() ? ` — stderr: ${truncate(probe.stderr.trim(), 300)}` : "")
+      : null;
+  return reduce;
 }
 
 /** Load the JS module reducer or spawn the subprocess one — same shape out. */
@@ -308,11 +330,32 @@ export async function runDispatchBlock(
   ctx: CaseCtx,
   failures: Failure[]
 ): Promise<DispatchOutcome | null> {
+  // The mode rules run for the llm-embedded block too. They were only applied
+  // by validateCases (kind: dispatch cases), so a `dispatch:` block with both
+  // module: and command:, or with neither, was accepted here silently.
+  const modeProblem = checkDispatchMode(spec);
+  if (modeProblem) {
+    failures.push({ path: "dispatch", message: modeProblem });
+    return null;
+  }
   let reduce: Reducer;
   try {
     reduce = await makeReducer(spec, ctx.baseDir);
   } catch (e: any) {
     failures.push({ path: spec.command ? "dispatch.command" : "dispatch.module", message: e.message });
+    return null;
+  }
+  // Zero tool calls means the reducer was never exercised, so `expect` is
+  // scored against the untouched initialState and passes vacuously. That is a
+  // green tick for a chain nothing traversed.
+  if (!toolCalls.length) {
+    const probeFailure = (reduce as any).probeFailure;
+    failures.push({
+      path: "dispatch",
+      message: probeFailure
+        ? `the model produced no tool calls, and ${probeFailure}`
+        : `the model produced no tool calls, so the reducer never ran — nothing about the app was verified`,
+    });
     return null;
   }
   try {

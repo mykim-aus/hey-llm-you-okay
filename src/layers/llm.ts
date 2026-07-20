@@ -360,15 +360,29 @@ export async function runLlmCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult>
     }
   }
   const passed = attempts.filter((a) => a.ok).length;
-  const ok = passed / attempts.length >= passRate;
-  const failures: Failure[] = ok
-    ? []
-    : [
-        ...(repeat > 1
-          ? [{ path: "passRate", message: `passed ${passed}/${attempts.length} attempts (need ratio >= ${passRate})` }]
-          : []),
-        ...(attempts.find((a) => !a.ok)?.failures || []),
-      ];
+  // An attempt that never reached the model produced NO verdict, so it must not
+  // be laundered through passRate as an ordinary miss. With repeat: 4 and
+  // passRate: 0.25, three unreachable attempts and one success used to report a
+  // clean PASS — a green run for a case measured once out of four times.
+  const infraAttempts = attempts.filter((a) => (a.failures || []).some((f) => f.infra));
+  const ok = passed / attempts.length >= passRate && infraAttempts.length === 0;
+  const failures: Failure[] = [];
+  if (infraAttempts.length)
+    failures.push({
+      path: "provider",
+      message:
+        `${infraAttempts.length} of ${attempts.length} attempt(s) never reached the provider, so this case has no verdict: ` +
+        (infraAttempts[0].failures || []).map((f) => f.message).join("; "),
+      infra: true,
+    });
+  if (!ok && passed / attempts.length < passRate) {
+    if (repeat > 1)
+      failures.push({
+        path: "passRate",
+        message: `passed ${passed}/${attempts.length} attempts (need ratio >= ${passRate})`,
+      });
+    failures.push(...(attempts.find((a) => !a.ok && !(a.failures || []).some((f) => f.infra))?.failures || []));
+  }
   return {
     ok,
     failures,
