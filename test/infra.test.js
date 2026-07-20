@@ -202,3 +202,23 @@ test("callProvider tags foreign errors but preserves ProviderError", async () =>
     (e) => e === original, "an existing ProviderError must pass through unchanged"
   );
 });
+
+test("toolCalled rejects a matcher object instead of stringifying it", async () => {
+  const { checkLlmExpect } = await import("../dist/layers/llm.js");
+  const actual = { text: "", fullText: "", json: undefined, toolCalls: [], toolNames: ["get_account"] };
+
+  // The bug: `{ $in: [...] }` became the literal string "[object Object]", so
+  // the run reported that a tool by that name was never called — a malformed
+  // expectation disguised as a model failure.
+  const f = [];
+  checkLlmExpect({ toolCalled: { $in: ["get_account", "get_account_summary"] } }, actual, f);
+  assert.equal(f.length, 1);
+  assert.match(f[0].message, /takes a tool name/);
+  assert.match(f[0].message, /anyToolCalled/, "must name the key that does what was meant");
+  assert.doesNotMatch(f[0].message, /\[object Object\]/);
+
+  // strings and string lists still work
+  const ok = [];
+  checkLlmExpect({ toolCalled: "get_account" }, actual, ok);
+  assert.equal(ok.length, 0);
+});

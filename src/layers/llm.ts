@@ -30,6 +30,29 @@ import { runDispatchBlock } from "./dispatch.js";
 
 const toArr = (v: unknown): string[] => (v === undefined ? [] : Array.isArray(v) ? v : [v as string]);
 
+/**
+ * `toolCalled` compares tool NAMES, so it takes a string or a list of strings —
+ * not a matcher object. Writing `toolCalled: { $in: [a, b] }` used to stringify
+ * to `[object Object]` and report that a tool by that literal name was never
+ * called, which reads as a model failure instead of a malformed expectation.
+ * The layer already fails loudly on an unknown expect KEY; this extends the
+ * same promise to a wrong VALUE, and names the key that does what was meant.
+ */
+function assertToolNameSpec(key: string, spec: unknown, failures: Failure[]): boolean {
+  const bad = toArr(spec).filter((n) => typeof n !== "string");
+  if (!bad.length) return true;
+  const hint =
+    key === "toolCalled"
+      ? " — for 'one of these', use `anyToolCalled: [a, b]`"
+      : " — pass a tool name or a list of names";
+  failures.push({
+    path: key,
+    message:
+      `'${key}' takes a tool name or a list of tool names, got ${JSON.stringify(spec)}${hint}`,
+  });
+  return false;
+}
+
 function normMessages(list: any[]): ChatMessage[] {
   return (list || []).map((m) => {
     if (m.user !== undefined) return { role: "user" as const, content: m.user };
@@ -160,6 +183,7 @@ export function checkLlmExpect(
   for (const [key, spec] of Object.entries(expect || {})) {
     switch (key) {
       case "toolCalled":
+        if (!assertToolNameSpec("toolCalled", spec, failures)) break;
         for (const name of toArr(spec))
           if (!actual.toolNames.includes(name))
             failures.push({
@@ -202,6 +226,7 @@ export function checkLlmExpect(
         break;
       }
       case "notToolCalled":
+        if (!assertToolNameSpec("notToolCalled", spec, failures)) break;
         for (const name of toArr(spec))
           if (actual.toolNames.includes(name))
             failures.push({
