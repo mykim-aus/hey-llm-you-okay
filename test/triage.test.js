@@ -130,6 +130,7 @@ layers:
     subject: m
     judge: j
     gate: false
+    env: [HAECHI_TEST_WORD]   # declared → interpolatable (no blanket env fallback)
     cases:
       - name: quality
         input: { system: "SAY: {{HAECHI_TEST_WORD}}", prompt: "질문" }

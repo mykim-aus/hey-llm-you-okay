@@ -79,14 +79,21 @@ export async function runSuite(config: HaechiConfig, opts: RunOptions = {}): Pro
   const maxDrop = config.settings.maxDrop ?? 1;
   let gateBroken = false;
 
-  const makeCtx = (layer: LayerConfig, baseDir: string, saved: Record<string, unknown> = {}): CaseCtx => ({
-    layer,
-    providers,
-    baseDir,
-    saved,
-    lookup: makeLookup(layer.vars, saved),
-    config,
-  });
+  const makeCtx = (layer: LayerConfig, baseDir: string, saved: Record<string, unknown> = {}): CaseCtx => {
+    // Only the env vars a layer DECLARES are interpolatable — never all of
+    // process.env (prompt pollution + secrets leaking into the baseline).
+    const envScope = Object.fromEntries(
+      (layer.env || []).filter((k) => process.env[k] !== undefined).map((k) => [k, process.env[k]])
+    );
+    return {
+      layer,
+      providers,
+      baseDir,
+      saved,
+      lookup: makeLookup(envScope, layer.vars, saved),
+      config,
+    };
+  };
 
   for (const layer of config.layers) {
     if (opts.only?.length && !opts.only.includes(layer.name)) continue;

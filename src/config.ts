@@ -165,7 +165,32 @@ const KIND_KEYS: Record<string, string[]> = {
   judge: ["input", "output", "transcript", "context", "rubric", "scale", "votes", "threshold", "minScores", "judgeParams"],
 };
 
-/** Per-kind required-field + unknown-key lint. Returns problem strings. */
+/**
+ * Compile every $pattern/$notPattern in an expect tree so a bad regex is an
+ * authoring error found by `validate` — not a runtime failure discovered after
+ * `repeat` paid model calls.
+ */
+export function lintExpectRegexes(node: unknown, where: string, problems: string[]): void {
+  if (Array.isArray(node)) {
+    for (const v of node) lintExpectRegexes(v, where, problems);
+    return;
+  }
+  if (!isPlainObject(node)) return;
+  for (const key of ["$pattern", "$notPattern"] as const) {
+    if (typeof node[key] === "string") {
+      try {
+        new RegExp(node[key] as string, typeof node.$flags === "string" ? node.$flags : "");
+      } catch (e: any) {
+        problems.push(
+          `${where}: invalid ${key} /${node[key]}/ — ${e.message} (JS has no inline (?i); use $flags: "i")`
+        );
+      }
+    }
+  }
+  for (const v of Object.values(node)) lintExpectRegexes(v, where, problems);
+}
+
+/** Per-kind required-field + unknown-key + regex lint. Returns problem strings. */
 export function validateCases(layer: LayerConfig, groups: CaseGroup[]): string[] {
   const problems: string[] = [];
   const need = (cond: unknown, file: string | null, cs: CaseDef, msg: string) => {
@@ -174,6 +199,11 @@ export function validateCases(layer: LayerConfig, groups: CaseGroup[]): string[]
   const allowed = new Set([...COMMON_KEYS, ...(KIND_KEYS[layer.kind] || [])]);
   for (const g of groups) {
     for (const cs of g.cases) {
+      const at = `${g.file || "(inline)"} › ${cs.name}`;
+      lintExpectRegexes(cs.expect, at, problems);
+      lintExpectRegexes(cs.forbid, at, problems);
+      lintExpectRegexes(cs.require, at, problems);
+      for (const turn of cs.conversation || []) lintExpectRegexes(turn?.expect, at, problems);
       for (const key of Object.keys(cs))
         if (!allowed.has(key))
           problems.push(

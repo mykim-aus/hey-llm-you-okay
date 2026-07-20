@@ -170,3 +170,322 @@ layers:
   const inputs = await resolveLlmInputs(groups[0].cases[0], ctx);
   assert.equal(inputs.system, "SAY: FROM-ROOT");
 });
+
+test("non-JSON body: json/jsonPath FAIL loudly (no silent false-pass on negatives)", async () => {
+  const { applyExpect } = await import("../dist/index.js");
+  const actual = { text: "hello, not json", json: undefined };
+  // the killer case: model produced no structured output at all, yet a
+  // negative assertion used to pass
+  const neg = applyExpect({ jsonPath: { "data.uiAction": { $notContains: "start_roleplay" } } }, actual, []);
+  assert.equal(neg.length, 1);
+  assert.match(neg[0].message, /not JSON/);
+  const negJson = applyExpect({ json: { $ne: { bad: true } } }, actual, []);
+  assert.equal(negJson.length, 1);
+  // explicit absence assertions remain legal
+  assert.equal(applyExpect({ json: { $exists: false } }, actual, []).length, 0);
+  assert.equal(applyExpect({ jsonPath: { "a.b": { $exists: false } } }, actual, []).length, 0);
+});
+
+test("invalid regex is reported as an authoring error, not a provider failure", async () => {
+  const { matchValue } = await import("../dist/index.js");
+  const f = [];
+  matchValue({ $pattern: "(?i)hello" }, "HELLO", "text", f); // JS has no inline (?i)
+  assert.equal(f.length, 1);
+  assert.match(f[0].message, /invalid \$pattern regex/);
+  assert.match(f[0].message, /\$flags/);
+});
+
+test("llm case rejects keys that only exist on other layers", async () => {
+  const { checkLlmExpect } = await import("../dist/layers/llm.js");
+  const actual = { text: "hi", fullText: "hi", json: undefined, toolCalls: [], toolNames: [] };
+  const f = [];
+  checkLlmExpect({ status: 200 }, actual, f);
+  assert.equal(f.length, 1);
+  assert.match(f[0].message, /not available on an llm case/);
+});
+
+test("capture warns when the ledger is unreachable from the layer's include", async () => {
+  const dir = await scaffold({
+    "haechi.yaml": `
+providers:
+  m: { kind: openai-compatible, baseUrl: http://x, model: m }
+settings: { capture: { file: ledger/out.yaml } }
+layers:
+  - { name: b, kind: llm, provider: m, include: "tests/*.yaml" }
+`,
+    "tests/a.yaml": `cases: [{ name: seed, prompt: hi }]`,
+  });
+  const config = await loadConfig(path.join(dir, "haechi.yaml"));
+  const res = await captureCase(config, "unreachable input");
+  assert.equal(res.reachable, false, "ledger/out.yaml is not matched by tests/*.yaml");
+
+  // and the reachable case reports true
+  const dir2 = await scaffold({
+    "haechi.yaml": `
+providers:
+  m: { kind: openai-compatible, baseUrl: http://x, model: m }
+settings: { capture: { file: tests/captured.yaml } }
+layers:
+  - { name: b, kind: llm, provider: m, include: "tests/*.yaml" }
+`,
+    "tests/a.yaml": `cases: [{ name: seed, prompt: hi }]`,
+  });
+  const res2 = await captureCase(await loadConfig(path.join(dir2, "haechi.yaml")), "reachable input");
+  assert.equal(res2.reachable, true);
+});
+
+test("judgeParams.temperature: null omits the parameter (reasoning models reject it)", async () => {
+  const { createProviders } = await import("../dist/index.js");
+  let captured = null;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    captured = JSON.parse(init.body);
+    return new Response(JSON.stringify({ choices: [{ message: { content: "{}" } }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const p = createProviders({ m: { kind: "openai-compatible", baseUrl: "http://x/v1", model: "m" } });
+    await p.m.chat({ messages: [{ role: "user", content: "hi" }], temperature: undefined });
+    assert.equal("temperature" in captured, false, "undefined temperature must not be sent");
+    await p.m.chat({ messages: [{ role: "user", content: "hi" }], temperature: 0 });
+    assert.equal(captured.temperature, 0);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("glob follows symlinked files (parity with exact non-glob paths)", async () => {
+  const { symlink } = await import("node:fs/promises");
+  const dir = await scaffold({
+    "real/prompt.txt": "SAFETY rules here\n",
+    "haechi.yaml": `
+providers: {}
+layers:
+  - name: s
+    kind: static
+    cases:
+      - { name: via-glob, files: "linked/*.txt", require: [{ pattern: "SAFETY" }] }
+`,
+  });
+  await mkdir(path.join(dir, "linked"), { recursive: true });
+  await symlink(path.join(dir, "real/prompt.txt"), path.join(dir, "linked/prompt.txt"));
+  const s = await runSuite(await loadConfig(path.join(dir, "haechi.yaml")));
+  const r = s.layers[0].cases[0].result;
+  assert.equal(r.ok, true, JSON.stringify(r.failures));
+  assert.equal(r.detail.files, 1);
+});
+
+test("http redirect: manual lets a case assert the 3xx itself", async () => {
+  const http = await import("node:http");
+  const server = http.createServer((req, res) => {
+    if (req.url === "/old") {
+      res.writeHead(301, { location: "/new" });
+      return res.end();
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end('{"ok":true}');
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const dir = await scaffold({
+      "haechi.yaml": `
+providers: {}
+layers:
+  - name: api
+    kind: http
+    cases:
+      - name: asserts-301
+        request: { url: "${base}/old", redirect: manual }
+        expect: { status: 301, headers: { location: /new } }
+      - name: follows-by-default
+        request: { url: "${base}/old" }
+        expect: { status: 200, json: { ok: true } }
+`,
+    });
+    const s = await runSuite(await loadConfig(path.join(dir, "haechi.yaml")));
+    assert.equal(s.layers[0].cases[0].result.ok, true, JSON.stringify(s.layers[0].cases[0].result.failures));
+    assert.equal(s.layers[0].cases[1].result.ok, true, JSON.stringify(s.layers[0].cases[1].result.failures));
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+// ── second wave: verified by the adversarial review's reproduction scripts ──
+
+const dumpBody = async (providerCfg, req) => {
+  const { createProviders } = await import("../dist/index.js");
+  let body = null;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (_u, init) => {
+    body = JSON.parse(init.body);
+    return new Response(JSON.stringify({ choices: [{ message: { content: "{}" } }], content: [], candidates: [] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    await createProviders({ p: providerCfg }).p.chat(req);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  return body;
+};
+
+test("temperature: null is OMITTED by every provider (null used to be serialized → 400)", async () => {
+  const req = { messages: [{ role: "user", content: "hi" }], temperature: null };
+  for (const cfg of [
+    { kind: "openai-compatible", baseUrl: "http://x/v1", model: "gpt-4o" },
+    { kind: "anthropic", baseUrl: "http://x", model: "claude-sonnet-4-5", apiKeyEnv: "NONE" },
+    { kind: "gemini", baseUrl: "http://x", model: "gemini-2.5-flash", apiKeyEnv: "NONE" },
+  ]) {
+    process.env.NONE = "k";
+    const body = await dumpBody(cfg, req);
+    const where = cfg.kind === "gemini" ? body.generationConfig || {} : body;
+    assert.equal("temperature" in where, false, `${cfg.kind} must omit null temperature`);
+  }
+  delete process.env.NONE;
+});
+
+test("reasoning models: temperature omitted + max_completion_tokens used", async () => {
+  const req = { messages: [{ role: "user", content: "hi" }], temperature: 0, maxTokens: 512 };
+  const o3 = await dumpBody({ kind: "openai-compatible", baseUrl: "http://x/v1", model: "o3-mini" }, req);
+  assert.equal("temperature" in o3, false);
+  assert.equal(o3.max_completion_tokens, 512);
+  assert.equal("max_tokens" in o3, false);
+
+  const gpt4 = await dumpBody({ kind: "openai-compatible", baseUrl: "http://x/v1", model: "gpt-4o" }, req);
+  assert.equal(gpt4.temperature, 0);
+  assert.equal(gpt4.max_tokens, 512);
+
+  process.env.NONE = "k";
+  const newClaude = await dumpBody(
+    { kind: "anthropic", baseUrl: "http://x", model: "claude-opus-4-8", apiKeyEnv: "NONE" },
+    req
+  );
+  assert.equal("temperature" in newClaude, false, "newer Claude models reject sampling params");
+  delete process.env.NONE;
+});
+
+test("gemini: non-object tool fixtures are wrapped into a Struct; signature round-trips", async () => {
+  process.env.NONE = "k";
+  const body = await dumpBody(
+    { kind: "gemini", baseUrl: "http://x", model: "gemini-3-pro-preview", apiKeyEnv: "NONE" },
+    {
+      messages: [
+        { role: "user", content: "weather?" },
+        { role: "assistant", toolCalls: [{ name: "get_weather", args: {}, signature: "SIG_ABC" }] },
+        {
+          role: "tool",
+          toolResults: [
+            { name: "get_weather", response: "sunny, 21C" }, // plain text fixture
+            { name: "arr", response: [1, 2] },
+            { name: "obj", response: { temp: 21 } },
+          ],
+        },
+      ],
+    }
+  );
+  delete process.env.NONE;
+  const fr = body.contents.flatMap((c) => c.parts).filter((p) => p.functionResponse);
+  assert.deepEqual(fr[0].functionResponse.response, { result: "sunny, 21C" });
+  assert.deepEqual(fr[1].functionResponse.response, { result: [1, 2] });
+  assert.deepEqual(fr[2].functionResponse.response, { temp: 21 }); // objects pass through
+  const fc = body.contents.flatMap((c) => c.parts).find((p) => p.functionCall);
+  assert.equal(fc.thoughtSignature, "SIG_ABC");
+});
+
+test("{{VAR}} expands ONLY declared env vars (no prompt pollution, no secrets in baseline)", async () => {
+  process.env.HAECHI_DECLARED = "declared-value";
+  process.env.HAECHI_SECRET_KEY = "sk-must-never-appear";
+  const dir = await scaffold({
+    "haechi.yaml": `
+providers:
+  m: { kind: openai-compatible, baseUrl: http://127.0.0.1:1/v1, model: m }
+layers:
+  - name: b
+    kind: llm
+    provider: m
+    gate: false
+    env: [HAECHI_DECLARED]
+    cases:
+      - name: c
+        system: "declared={{HAECHI_DECLARED}} secret={{HAECHI_SECRET_KEY}} tpl={{USER}}"
+        prompt: hi
+`,
+  });
+  const config = await loadConfig(path.join(dir, "haechi.yaml"));
+  const { resolveLlmInputs } = await import("../dist/layers/llm.js");
+  const layer = config.layers[0];
+  const groups = await loadLayerCases(layer, config.baseDir);
+  const envScope = Object.fromEntries((layer.env || []).map((k) => [k, process.env[k]]));
+  const { makeLookup } = await import("../dist/util.js");
+  const inputs = await resolveLlmInputs(groups[0].cases[0], {
+    layer,
+    providers: {},
+    baseDir: config.baseDir,
+    saved: {},
+    lookup: makeLookup(envScope, layer.vars, {}),
+    config,
+  });
+  assert.match(inputs.system, /declared=declared-value/);
+  assert.match(inputs.system, /secret=\{\{HAECHI_SECRET_KEY\}\}/, "undeclared secret must stay literal");
+  assert.match(inputs.system, /tpl=\{\{USER\}\}/, "template placeholders must not collide with env");
+  delete process.env.HAECHI_DECLARED;
+  delete process.env.HAECHI_SECRET_KEY;
+});
+
+test("$contains compares scalars symmetrically across strings and arrays", async () => {
+  const { matchValue } = await import("../dist/index.js");
+  const fails = (spec, got) => {
+    const f = [];
+    matchValue(spec, got, "x", f);
+    return f.length;
+  };
+  assert.equal(fails({ $contains: 23 }, "order 23 ready"), 0);
+  assert.equal(fails({ $contains: 23 }, ["23", "24"]), 0, "number needle vs string array");
+  assert.equal(fails({ $contains: "23" }, [23, 24]), 0, "string needle vs number array");
+  assert.equal(fails({ $notContains: 23 }, ["23"]), 1, "negative form must catch it too");
+  assert.equal(fails({ $contains: 99 }, ["23"]), 1);
+});
+
+test("exec case rejects http/llm-only expect keys", async () => {
+  const dir = await scaffold({
+    "haechi.yaml": `
+providers: {}
+layers:
+  - name: e
+    kind: exec
+    gate: false
+    cases:
+      - { name: wrong-keys, command: "echo hi", expect: { status: { $ne: 500 }, text: { $notContains: "err" } } }
+`,
+  });
+  const s = await runSuite(await loadConfig(path.join(dir, "haechi.yaml")));
+  const r = s.layers[0].cases[0].result;
+  assert.equal(r.ok, false, "used to silently pass");
+  assert.equal(r.failures.filter((f) => /not available on an exec case/.test(f.message)).length, 2);
+});
+
+test("validate lints regexes pre-flight (a typo costs 0 paid model calls)", async () => {
+  const dir = await scaffold({
+    "haechi.yaml": `
+providers:
+  m: { kind: openai-compatible, baseUrl: http://x, model: m }
+layers:
+  - { name: b, kind: llm, provider: m, include: "tests/*.yaml" }
+`,
+    "tests/a.yaml": `cases:
+  - name: bad-regex
+    prompt: hi
+    expect: { text: { $pattern: "(?i)foo" } }
+`,
+  });
+  const config = await loadConfig(path.join(dir, "haechi.yaml"));
+  const problems = validateCases(config.layers[0], await loadLayerCases(config.layers[0], config.baseDir));
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /invalid \$pattern/);
+  assert.match(problems[0], /\$flags/);
+});

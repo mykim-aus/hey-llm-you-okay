@@ -37,7 +37,11 @@ export function anthropic(cfg: ProviderConfig, name: string) {
         messages,
       };
       if (req.system) body.system = req.system;
-      if (req.temperature !== undefined) body.temperature = req.temperature;
+      // Newer Claude models removed sampling params — sending them is a 400.
+      const omitTemp =
+        cfg.omitTemperature ?? /^claude-(opus-4-[78]|sonnet-5|fable-5)/.test(cfg.model ?? "");
+      if (req.temperature !== undefined && req.temperature !== null && !omitTemp)
+        body.temperature = req.temperature;
       if (req.tools?.length)
         body.tools = req.tools.map((t) => ({
           name: t.name,

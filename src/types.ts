@@ -19,6 +19,9 @@ export interface ToolCall {
   id?: string;
   name: string;
   args: Record<string, unknown>;
+  /** provider-neutral opaque signature that must be echoed back on the next
+   *  request (Gemini 3 thoughtSignature); ignored by other providers */
+  signature?: string;
 }
 
 export interface ToolResult {
@@ -38,7 +41,8 @@ export interface ChatRequest {
   system?: string;
   messages: ChatMessage[];
   tools?: ToolDecl[];
-  temperature?: number;
+  /** null = omit the parameter entirely (reasoning models reject it) */
+  temperature?: number | null;
   maxTokens?: number;
   /** ask the provider for JSON-mode output when supported */
   json?: boolean;
@@ -72,6 +76,10 @@ export interface ProviderConfig {
   retries?: number;
   maxTokens?: number;
   apiVersion?: string;
+  /** force-omit the temperature parameter (models that reject sampling params) */
+  omitTemperature?: boolean;
+  /** openai-compatible: which max-tokens field this server accepts */
+  maxTokensParam?: "max_tokens" | "max_completion_tokens";
   /** gemini: merged into generationConfig verbatim (e.g. thinkingConfig) */
   generationConfig?: Record<string, unknown>;
   // command kind
@@ -90,7 +98,8 @@ export interface Scale {
 }
 
 export interface JudgeParams {
-  temperature?: number;
+  /** null = omit the parameter entirely (reasoning models reject it) */
+  temperature?: number | null;
   maxTokens?: number;
 }
 

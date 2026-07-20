@@ -9,6 +9,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import YAML from "yaml";
+import { glob } from "./util.js";
 import type { CaseDef, HaechiConfig } from "./types.js";
 
 export interface CaptureOptions {
@@ -23,7 +24,7 @@ export async function captureCase(
   config: HaechiConfig,
   input: string,
   opts: CaptureOptions = {}
-): Promise<{ file: string; caseName: string; layer: string }> {
+): Promise<{ file: string; caseName: string; layer: string; reachable: boolean; patterns: string[] }> {
   const capture = config.settings.capture || {};
   const layerName =
     opts.layer ||
@@ -85,6 +86,12 @@ export async function captureCase(
   await mkdir(path.dirname(file), { recursive: true });
   await writeFile(file, YAML.stringify(doc));
 
-  // ensure the ledger is reachable from the layer's include globs — warn only
-  return { file, caseName, layer: layerName };
+  // A captured case that no include glob matches would never run — the whole
+  // point of the ledger. Verify reachability and report it to the caller.
+  const patterns = Array.isArray(layer.include) ? layer.include : layer.include ? [layer.include] : [];
+  const matched: string[] = [];
+  for (const pat of patterns) matched.push(...(await glob(pat, config.baseDir)));
+  const reachable = matched.some((m) => path.resolve(m) === path.resolve(file));
+
+  return { file, caseName, layer: layerName, reachable, patterns };
 }

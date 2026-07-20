@@ -132,10 +132,13 @@ async function runArm(
           rubric,
           scale,
         });
+        // honour the case/layer judgeParams — triage must not hardcode
+        // sampling params the configured model may reject
+        const jp = record.def.judgeParams ?? layer.judgeParams;
         const res = await judge.chat({
           messages: [{ role: "user", content: prompt }],
-          temperature: 0,
-          maxTokens: 1024,
+          temperature: jp && "temperature" in jp ? (jp.temperature ?? undefined) : 0,
+          maxTokens: jp?.maxTokens ?? 1024,
           json: true,
         });
         const parsed = extractJson(res.text);

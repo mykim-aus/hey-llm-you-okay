@@ -35,12 +35,18 @@ function deepEqual(a: unknown, b: unknown): boolean {
   return false;
 }
 
+const isScalar = (v: unknown) => v !== null && v !== undefined && typeof v !== "object";
+
 function containsValue(got: unknown, needle: unknown): boolean {
+  // Scalars compare by string form on BOTH sides — YAML gives no way to say
+  // "the number 23 as a string", so `$contains: 23` must behave the same
+  // against "order 23" and against ["23"].
   if (typeof got === "string") return got.includes(String(needle));
   if (Array.isArray(got))
     return got.some(
       (v) =>
         deepEqual(v, needle) ||
+        (isScalar(v) && isScalar(needle) && String(v) === String(needle)) ||
         (typeof v === "string" && typeof needle === "string" && v.includes(needle))
     );
   return false;
@@ -51,15 +57,21 @@ export function matchValue(spec: unknown, got: unknown, path: string, failures: 
   if (isMatcher(spec)) {
     for (const [key, arg] of Object.entries(spec)) {
       switch (key) {
-        case "$pattern": {
-          const re = new RegExp(String(arg), String(spec.$flags ?? ""));
-          if (!re.test(String(got ?? "")))
-            fail(failures, path, `expected /${arg}/ to match, got: ${truncate(got, 200)}`);
-          break;
-        }
+        case "$pattern":
         case "$notPattern": {
-          const re = new RegExp(String(arg), String(spec.$flags ?? ""));
-          if (re.test(String(got ?? "")))
+          // A bad regex is an authoring error — say so, don't let it surface
+          // later as a mysterious runtime/provider failure.
+          let re: RegExp;
+          try {
+            re = new RegExp(String(arg), String(spec.$flags ?? ""));
+          } catch (e: any) {
+            fail(failures, path, `invalid ${key} regex /${arg}/: ${e.message} (JS has no inline (?i) — use $flags: "i")`);
+            break;
+          }
+          const matched = re.test(String(got ?? ""));
+          if (key === "$pattern" && !matched)
+            fail(failures, path, `expected /${arg}/ to match, got: ${truncate(got, 200)}`);
+          if (key === "$notPattern" && matched)
             fail(failures, path, `expected /${arg}/ NOT to match, got: ${truncate(got, 200)}`);
           break;
         }
@@ -184,6 +196,10 @@ export interface GenericActual {
  * Layer-specific keys (toolCalled 등) must be consumed by the layer BEFORE
  * delegating here — unknown keys fail loudly (a typo must not silently pass).
  */
+/** `{$exists: false}` is the one spec that may legitimately assert absence. */
+const isExistsFalse = (spec: unknown) =>
+  isPlainObject(spec) && Object.keys(spec).length === 1 && spec.$exists === false;
+
 export function applyExpect(
   expect: Record<string, unknown> | undefined,
   actual: GenericActual,
@@ -197,10 +213,29 @@ export function applyExpect(
       case "exitCode":
         matchValue(spec, actual.exitCode, "exitCode", failures);
         break;
+      // json/jsonPath on a NON-JSON body must FAIL, never silently pass.
+      // Otherwise a model that produced no structured output at all satisfies
+      // every negative assertion ($ne/$notContains/$notPattern) — the worst
+      // possible bug in a test framework.
       case "json":
-        matchValue(spec, actual.json, "json", failures);
+        if (actual.json === undefined && !isExistsFalse(spec))
+          failures.push({
+            path: "json",
+            message: `response body is not JSON, so 'json' cannot be evaluated: ${truncate(actual.text, 160)}`,
+          });
+        else matchValue(spec, actual.json, "json", failures);
         break;
       case "jsonPath":
+        if (actual.json === undefined) {
+          const allAbsence = Object.values((spec as Record<string, unknown>) || {}).every(isExistsFalse);
+          if (!allAbsence) {
+            failures.push({
+              path: "jsonPath",
+              message: `response body is not JSON, so 'jsonPath' cannot be evaluated: ${truncate(actual.text, 160)}`,
+            });
+            break;
+          }
+        }
         for (const [p, s] of Object.entries((spec as Record<string, unknown>) || {}))
           matchValue(s, deepGet(actual.json, p), `jsonPath.${p}`, failures);
         break;

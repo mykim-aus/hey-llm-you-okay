@@ -10,7 +10,7 @@ import { deepGet, interpolateDeep } from "../util.js";
 export async function runHttpCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult> {
   const failures: Failure[] = [];
   const req = interpolateDeep(cs.request || {}, ctx.lookup);
-  const { method = "GET", url, headers = {}, json, body, timeoutMs = 15000 } = req;
+  const { method = "GET", url, headers = {}, json, body, timeoutMs = 15000, redirect } = req;
   if (!url) return { ok: false, failures: [{ path: "request.url", message: "required" }] };
 
   let actual: { status: number; json: unknown; text: string; headers: Record<string, string> };
@@ -18,6 +18,9 @@ export async function runHttpCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult
     const init: RequestInit = {
       method,
       headers: { ...headers },
+      // `redirect: manual` lets a case assert the 3xx itself (status + location)
+      // instead of silently following it.
+      redirect: redirect || "follow",
       signal: AbortSignal.timeout(timeoutMs),
     };
     if (json !== undefined) {

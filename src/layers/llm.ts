@@ -184,6 +184,18 @@ export function checkLlmExpect(
             matchValue(s, deepGet(call.args, p), `toolArgs.${toolName}.${p}`, failures);
         }
         break;
+      // keys that exist on other layers but never on an llm response — reject
+      // loudly instead of silently comparing against undefined
+      case "status":
+      case "exitCode":
+      case "headers":
+      case "stdout":
+      case "stderr":
+        failures.push({
+          path: key,
+          message: `'${key}' is not available on an llm case (did you mean 'text' or 'jsonPath'?)`,
+        });
+        break;
       default:
         rest[key] = spec;
     }
@@ -209,7 +221,18 @@ export async function produceLlm(
       messages.push({ role: "user", content: turn.user });
       last = await completeTurn(provider, inputs, messages, maxRounds);
       allCalls.push(...last.toolCalls);
-      messages = [...last.finalMessages, { role: "assistant", content: last.lastText || last.text }];
+      // An EMPTY assistant message is a 400 on Anthropic (only the final
+      // message may be blank), so never push one. It happens when the model
+      // replied with tool calls only and we had no fixture to continue with.
+      const reply = last.lastText || last.text;
+      messages = reply ? [...last.finalMessages, { role: "assistant", content: reply }] : [...last.finalMessages];
+      if (!reply && last.unanswered.length) {
+        perTurnFailures?.push({
+          path: `turn[${i}].toolResponses`,
+          message: `model called ${last.unanswered.map((t) => `'${t}'`).join(", ")} with no fixture, so the conversation cannot continue (add toolResponses or params.toolResponseDefault)`,
+        });
+        break;
+      }
       if (turn.expect && perTurnFailures) {
         const fs: Failure[] = [];
         checkLlmExpect(turn.expect, buildActual(last), fs);

@@ -160,7 +160,14 @@ async function cmdCapture(argv: Argv): Promise<number> {
   console.log(
     `${c.green("✓")} captured as ${c.bold(res.caseName)} → ${res.file} ${c.dim(`(layer: ${res.layer})`)}`
   );
-  console.log(c.dim("  add your expectations (expect:/rubric:) and commit — it runs on every `haechi run` from now on."));
+  if (res.reachable) {
+    console.log(c.dim("  add your expectations (expect:/rubric:) and commit — it runs on every `haechi run` from now on."));
+  } else {
+    console.log(
+      `${c.yellow("  ⚠ this file is NOT matched by layer '" + res.layer + "' include:")} ${res.patterns.join(", ") || "(none)"}`
+    );
+    console.log(c.yellow("    the captured case will never run until you add it to that layer's include globs."));
+  }
   return 0;
 }
 

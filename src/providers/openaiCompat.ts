@@ -50,8 +50,15 @@ export function openaiCompat(cfg: ProviderConfig, name: string) {
           type: "function",
           function: { name: t.name, description: t.description, parameters: t.parameters },
         }));
-      if (req.temperature !== undefined) body.temperature = req.temperature;
-      if (req.maxTokens) body.max_tokens = req.maxTokens;
+      // Reasoning models (o-series, GPT-5) reject `temperature` and only accept
+      // `max_completion_tokens`. Detect by model name; `omitTemperature` /
+      // `maxTokensParam` let third-party OpenAI-compatible servers override.
+      const reasoning = /^(o\d|gpt-5)/.test(cfg.model ?? "");
+      const omitTemp = cfg.omitTemperature ?? reasoning;
+      if (req.temperature !== undefined && req.temperature !== null && !omitTemp)
+        body.temperature = req.temperature;
+      if (req.maxTokens)
+        body[cfg.maxTokensParam ?? (reasoning ? "max_completion_tokens" : "max_tokens")] = req.maxTokens;
       if (req.json) body.response_format = { type: "json_object" };
 
       const headers: Record<string, string> = {};

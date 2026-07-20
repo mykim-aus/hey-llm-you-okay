@@ -113,9 +113,16 @@ async function askJudge(
   judgeParams: JudgeParams | undefined
 ): Promise<{ scores: Record<string, number>; reasoning: string } | null> {
   for (let attempt = 0; attempt < 2; attempt++) {
+    // temperature 0 is the default (determinism), but some models REJECT the
+    // parameter outright (reasoning models). `judgeParams.temperature: null`
+    // omits it entirely.
+    const temperature =
+      judgeParams && "temperature" in judgeParams
+        ? (judgeParams.temperature ?? undefined)
+        : 0;
     const res = await judgeProvider.chat({
       messages: [{ role: "user", content: prompt }],
-      temperature: judgeParams?.temperature ?? 0,
+      temperature,
       maxTokens: judgeParams?.maxTokens ?? 1024,
       json: true,
     });

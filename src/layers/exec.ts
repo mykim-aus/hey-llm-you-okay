@@ -64,7 +64,16 @@ export async function runExecCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult
   });
 
   if (actual.timedOut) failures.push({ path: "command", message: `timed out after ${timeoutMs}ms` });
-  applyExpect({ exitCode: 0, ...(cs.expect || {}) }, actual, failures);
+  // keys that exist on other layers but never on a process result — reject
+  // loudly (copying an http/llm case into exec must not silently always-pass)
+  for (const key of ["status", "json", "jsonPath", "text", "headers"])
+    if (cs.expect && key in cs.expect)
+      failures.push({
+        path: key,
+        message: `'${key}' is not available on an exec case (did you mean 'stdout' or 'stderr'?)`,
+      });
+  const { status, json, jsonPath, text, headers, ...rest } = (cs.expect || {}) as Record<string, unknown>;
+  applyExpect({ exitCode: 0, ...rest }, actual, failures);
   return {
     ok: !failures.length,
     failures,
