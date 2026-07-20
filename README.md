@@ -49,10 +49,15 @@ The ledger is a normal YAML case file — reviewed in PRs, version-controlled, a
 ## Does it find real bugs?
 
 In the first production project to adopt it — a hands-free voice assistant with
-16 tools, already covered by 96 test files, all green — `heyllm` surfaced **three
-shipped bugs in one day**: a test suite validating a prompt production never
-sends, an app that suppressed a visual and then told the model it hadn't, and an
-entire conversation mode answering in the wrong language across 13 locales.
+16 tools, already covered by 96 green test files — three shipped bugs surfaced in
+one day: a suite validating a prompt production never sends, an app that
+suppressed a visual and then told the model it hadn't, and a whole conversation
+mode answering in the wrong language across 13 locales.
+
+The case study is deliberately unflattering about what that proves. None of the
+three needed a new framework to find; two of the fixes are plain Jest tests. What
+was missing was **checking that the tests pointed at what production runs** — and
+`heyllm`'s own trust gate got that wrong on first release too.
 
 **[Read the case study →](CASE-STUDY.md)**
 

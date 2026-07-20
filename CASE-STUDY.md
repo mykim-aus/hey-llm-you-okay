@@ -1,26 +1,30 @@
-# Case study: three silent bugs in a shipped voice assistant
+# Case study: what a test suite measures, and what it misses
 
-> Real findings from the first production project to adopt `heyllm`, in one day.
-> Every number below was measured, not estimated.
+> Findings from the first production project to adopt `heyllm`. Every number was
+> measured. **Read the "What this is not evidence of" section too** — the honest
+> reading of this data is narrower than the headline.
 
 **The system under test.** A language-learning app with a hands-free voice tutor
 built on Gemini Live over a WebSocket. The model can call 16 tools — show a
 grammar card, open a video, start a lesson, switch modes. The user is often
 driving, so "can they look at the screen right now?" changes what the assistant
-is allowed to do. This is a hard target: no HTTP request to assert on, a system
-prompt assembled at runtime from eleven pieces, and behaviour that depends on
-device state.
+may do.
 
-It already had **96 test files** — 52 Jest suites and 45 bespoke harness scripts.
-All green.
+It already had **96 test files** — 52 Jest suites and 45 harness scripts — and
+they were all green. Three shipped bugs were found in one day.
+
+**None of them required a new tool to find.** All three were reachable with the
+Jest suite that was already there. Two of the fixes are, in fact, plain Jest
+tests. What was missing was not tooling; it was **checking that the tests were
+pointed at what production actually runs**. That is the real subject of this
+document.
 
 ---
 
-## Bug 1 — The tests were sending a prompt production never sends
+## Bug 1 — The tests validated a prompt production never sends
 
-The suite validated the model's behaviour by rebuilding the system prompt in a
-test helper. Production assembled it in the route handler. Nobody had compared
-the two.
+The suite rebuilt the system prompt in a test helper. Production assembled it in
+the route handler. Nobody had compared the two.
 
 ```
 production   58,392 chars   (11 sections)
@@ -32,50 +36,47 @@ Size was not the problem — *which* sections were missing was:
 
 | missing section | what it does |
 |---|---|
-| `persona` | the character voice that made the assistant chatty in a real user complaint |
+| `persona` | the character voice implicated in a real user complaint |
 | `memory` | what the assistant remembers about this user |
 | `recentSession` | continuity with previous conversations |
 | `reviewVocab` | **"when presenting a practice exercise, weave in one of the learner's review words"** |
 
 That last one directly contradicts a rule added the same morning: *"when the
 learner says they'll produce the English themselves, your turn contains zero
-English."* Review words **are** English words. The two instructions fight — and
-the test could never see the fight, because the test never loaded the section
-that starts it.
+English."* Review words **are** English words. The instructions fight — and no
+test could see the fight, because no test loaded the section that starts it.
 
-**Fix:** extract the assembly order into one function that both the route and
-the test helper call. Drift becomes structurally impossible.
+**Fix:** extract the assembly order into one function that both the route and the
+test helper call. Drift becomes structurally impossible. *This fix has nothing to
+do with `heyllm`* — it is ordinary refactoring, and it would have worked just as
+well behind Jest.
 
-**What happened next is the point.** With the real prompt, a test that had been
-passing 4/4 started failing **0/6**. The green was never real — it was measured
-against a prompt no user ever receives.
+**What happened next is the point.** With the real prompt, a case that had been
+passing 4/4 started failing **0/6**. The green was never real.
 
 > If your prompt is assembled in code, ask what your tests are actually sending.
 > A test that builds its own prompt is testing a program you do not ship.
 
 ---
 
-## Bug 2 — The app suppressed the visual, then told the model it hadn't
+## Bug 2 — The app suppressed a visual, then told the model it hadn't
 
 The assistant can advance a lesson to its video stage. The client correctly
-refuses to load videos when the user cannot see the screen — someone driving
-gets no video. That part worked.
+refuses to load videos when the user cannot see the screen. That part worked.
 
 But the response handed **back to the model** was a fixed string:
 
 ```js
-// hands-free tool response, screen state not considered
+// tool response — screen state was not a parameter
 note: "Example clips are appearing on the learner's screen.
        Invite them to play one and repeat its sentence aloud."
 ```
 
-So the model was told clips are on screen, and dutifully said *"go ahead and
-play the video"* — to a driver looking at the road. The app was right; the
-**feedback loop** lied.
+So the model was told clips were on screen and said *"go ahead, play the video"*
+— to someone driving. The app was right; the **feedback loop** lied.
 
-A sibling function in the same file had solved this properly, branching on
-screen state and returning *"the learner cannot see the screen, so NOTHING was
-shown."* The stage-transition handler simply never received the state.
+A sibling function in the same file already did this correctly, branching on
+screen state. The stage-transition handler simply never received the state.
 
 ```diff
 -function toolResponse(call) {
@@ -83,37 +84,34 @@ shown."* The stage-transition handler simply never received the state.
    if (stage === "video") {
 +    if (screenState === "hidden")
 +      return { note: "The learner cannot see the screen, so NO clips were shown.
-+                      Do NOT mention videos or looking at anything.
-+                      Skip straight to the speaking practice." };
++                      Do NOT mention videos or looking at anything." };
      return { note: "Example clips are appearing on the learner's screen. …" };
 ```
 
-This is the joint `heyllm`'s `dispatch` layer exists for. Assertions on the
-model's output pass: the model called the right tool with the right arguments.
-The bug is entirely in what the app does next — and in what it tells the model
-it did.
+**This was found by reading, not by the tool** — while porting the tool handler
+into a pure reducer, line by line against the original. The regression test that
+now pins it is a **Jest** test. What `heyllm` contributed was forcing the port
+that made the read happen.
 
 ---
 
 ## Bug 3 — A whole mode was broken, in one language
 
-The voice tutor has an "English conversation" mode: the assistant is supposed to
-speak English so the learner can practise listening. Testing it was a two-line
-case. It failed:
+The voice tutor has an "English conversation" mode: the assistant should speak
+English so the learner can practise listening. Testing it was a two-line case:
 
 ```
 ✗ submode-conversation-opens-in-english
-    ↳ text: expected /[A-Za-z]+(?:[ ,]+[A-Za-z]+){3,}/ to match,
-      got: 뉴욕에 놀러 간 무디예요! 반가워요. 오늘은 어떤 영어 표현을…
+    ↳ expected an English sentence, got: 반가워요! 오늘은 어떤 영어 표현을…
 ```
 
 Entirely in Korean. The mode instruction — *"your replies are natural spoken
-ENGLISH… greet them warmly in English"* — was present in the prompt. It lost to
-a sentence near the very top: *"Always respond in Korean."*
+ENGLISH"* — was in the prompt. It lost to a sentence near the very top: *"Always
+respond in Korean."*
 
-The team had already hit this exact failure in the text chat six weeks earlier
-and built a fix: a final language section appended **last**, to win on recency.
-The comment on it reads:
+The team had hit this exact failure in the text chat six weeks earlier and built
+a fix: a final language section appended **last**, to win on recency. Its comment
+reads:
 
 > *"…later sections inject large amounts of Korean data and push the top-level
 > rule out. Re-assert the language rule as the LAST section to recover recency
@@ -121,45 +119,46 @@ The comment on it reads:
 
 The voice path never used it. `grep` for that guard in the voice route: **zero
 hits**. A fix that shipped for one surface silently did not apply to the other —
-and it was not only conversation mode. **Thirteen non-Korean locales** were
-running hands-free with no language guard at all.
+and not only for conversation mode. **Thirteen non-Korean locales** were running
+hands-free with no language guard at all.
+
+This one *was* surfaced by a test — but only because the sub-mode axis was
+finally exercised. Nothing prevented that test from being written in Jest a year
+ago. It simply never was.
 
 ---
 
-## What it cost, and what it caught
+## What this is not evidence of
 
-Adoption was one YAML file wrapping the existing 96 test files as-is, plus a few
-native cases:
+**It is not evidence that Jest or the existing 96 files were inadequate.** They
+were pointed at the wrong artifact. A suite that faithfully tests a prompt you
+never ship will be green forever, in any framework. The failure was in test
+*design*, not test *tooling*, and saying otherwise would be marketing.
 
-```yaml
-layers:
-  - { name: hygiene,  kind: static, include: tests/static.yaml }
-  - { name: unit,     kind: exec,   cases: [{ name: jest, command: "npx jest --ci" }] }
-  - { name: dispatch, kind: dispatch, include: tests/dispatch.yaml }   # no model calls
-  - { name: behavior, kind: llm, provider: gemini, include: tests/behavior.yaml }
-  - { name: quality,  kind: judge, subject: gemini, judge: local-cli, include: tests/quality.yaml }
-```
+**It is not evidence that `dispatch` is free to adopt.** The document above makes
+extracting a pure reducer sound like a checklist item. Here is what it actually
+took in a 6,000-line React component:
 
-| | |
-|---|---|
-| Existing tests rewritten | **0** — wrapped by the `exec` layer |
-| Real bugs found in one day | **3**, all shipped, all invisible to the existing 96 files |
-| Cost of the deterministic layers | **$0** — `static`, `exec` and `dispatch` call no model |
-| Model spend for the behaviour layer | **~20s per full run** |
+- The handler read state from `useRef` for some values and from functional
+  `setState` (`setPanel(prev => …)`) for others. **A reducer needs to read
+  current state, and one of those cannot be read outside a render.** Mirror refs
+  had to be introduced, and all 21 setter call sites routed through a helper so
+  the mirrors could never fall behind.
+- The first extraction was a *parallel copy*, not wired in. That is worse than
+  useless: the `dispatch` tests then verify a mirror, and the mirror drifts. It
+  took a second pass — plus a guard test asserting the component has **no** tool
+  branches of its own — to close that.
+- The copy had already drifted before it was wired: the original cleared the
+  screen panel when the user went hands-free, the copy did not. A test caught it
+  only because the original was re-read.
 
-The deterministic `dispatch` layer is the one that keeps paying: it replays
-recorded tool calls through the app's own reducer, so "the model was right and
-the UI did nothing" fails on every commit, for free.
+Budget a day for a handler of this size, and expect to touch state management,
+not just add a file. The payoff is real — that layer runs on every commit with
+no model calls — but "extract a pure reducer" is a refactor, not a config change.
 
----
-
-## A fourth finding: the tool's own trust check was wrong
-
-Worth recording because it is the same mistake in a different place.
-
-`heyllm` measures whether a judge can be trusted before letting it gate a build.
-The first implementation measured **agreement between votes inside one run**.
-The real data looked like this:
+**It is not evidence that the tool's own claims are self-verifying.** `heyllm`'s
+judge-trust gate was wrong on first release, in exactly the same shape as the
+bugs above. It measured agreement **between votes inside one run**:
 
 | run | votes | spread within run |
 |---|---|---|
@@ -167,26 +166,65 @@ The real data looked like this:
 | 2 | **(2, 3)** | 1 |
 | 3 | (10, 9) | 1 |
 
-Every run agreed with itself. The gate saw three stable verdicts — and run 2's
+Every run agreed with itself, so the gate called all three stable — and run 2's
 tight internal agreement stamped confidence on a score six points off. **The
-variance was on the time axis, and no number of votes can see it.**
-
-`heyllm` now keeps a run-axis ledger and attributes the swing: if the judged
-output hash is identical across runs while the scores move, the *judge* moved,
-which means the rubric is missing a decision rule — more samples will not help.
-
-The lesson generalises past this tool: **check which axis your measurement is
-on.** All three product bugs above are the same shape — something was measured,
-it just wasn't the thing that breaks.
+variance was on the time axis, and no number of votes can see it.** The fix was
+a run-axis ledger with attribution: identical output hash + moving scores means
+the *judge* moved, so the rubric is missing a decision rule and more samples will
+not help.
 
 ---
 
+## What the adoption actually cost, and what it bought
+
+One YAML file wrapping the existing 96 files as-is, plus a few native cases:
+
+```yaml
+layers:
+  - { name: hygiene,  kind: static,   include: tests/static.yaml }
+  - { name: unit,     kind: exec,     cases: [{ name: jest, command: "npx jest --ci" }] }
+  - { name: dispatch, kind: dispatch, include: tests/dispatch.yaml }   # no model calls
+  - { name: behavior, kind: llm,   provider: gemini,  include: tests/behavior.yaml }
+  - { name: quality,  kind: judge, subject: gemini, judge: local-cli, include: tests/quality.yaml }
+```
+
+| | |
+|---|---|
+| Existing tests rewritten | **0** — wrapped by the `exec` layer |
+| Reducer extraction + wiring | **~1 day**, including one false start |
+| Deterministic layers (`static`/`exec`/`dispatch`) | **$0** — no model calls |
+| Live behaviour layer, full run | **~20s**, 7 scenarios |
+| Judge layer (local CLI), full run | **~30s** |
+
+Final state, all against real APIs: `hygiene` 4/4 · `harness-pure` 4/4 ·
+`dispatch` 7/7 · `behavior` 7/7 · `quality` 9.57/10 (vote spread ±0.28, down
+from a 5.6–9.3 swing before the rubric was rewritten as request-fulfilment
+rather than surface-property matching).
+
+Two pre-existing harness failures remain and are **not** fixed by any of this:
+a screen-state tool-choice drift in two scenarios, reproduced on a clean
+checkout before any change, and one dictation passage-length case. They are
+recorded as a known baseline rather than papered over.
+
+---
+
+## The transferable lesson
+
+All four findings — three product bugs and the tool's own — are the same shape:
+
+> Something was measured. It just wasn't the thing that breaks.
+
+Prompt length was measured; section content was not. Tool calls were asserted;
+what the app did next was not. Vote agreement was computed; run-to-run drift was
+not. Before adding a layer, it is worth asking of every green test you already
+have: **what exactly is this comparing, and is that what ships?**
+
 ## Reproducing this on your own project
 
-1. Point one `heyllm` `exec` case at your existing test command. Nothing to rewrite.
+1. Point one `exec` case at your existing test command. Nothing to rewrite.
 2. Add one `llm` case whose `system:` comes from the **same code path production
    uses** — `exec:` refs let you shell out to your own prompt builder.
-3. Diff the length of what your test sends against what production sends. If the
-   numbers differ, stop and fix that before trusting anything else.
-4. Extract your tool/action handler into a pure reducer and add a `dispatch`
-   layer. It is free, deterministic, and it is where the shipped bugs were.
+3. Diff the length of what your test sends against what production sends. Fix any
+   gap before trusting anything else.
+4. Only then extract a reducer and add a `dispatch` layer. Budget a real day for
+   it, and wire it in — a parallel copy is worse than nothing.
