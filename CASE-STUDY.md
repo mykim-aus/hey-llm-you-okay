@@ -201,10 +201,35 @@ Final state, all against real APIs: `hygiene` 4/4 · `harness-pure` 4/4 ·
 from a 5.6–9.3 swing before the rubric was rewritten as request-fulfilment
 rather than surface-property matching).
 
-Two pre-existing harness failures remain and are **not** fixed by any of this:
-a screen-state tool-choice drift in two scenarios, reproduced on a clean
-checkout before any change, and one dictation passage-length case. They are
-recorded as a known baseline rather than papered over.
+### Postscript: the "known flaky baseline" was neither known nor flaky
+
+Four harness scenarios had been failing on every run for long enough to be
+written off as sampling noise, and were recorded as an accepted baseline —
+including in the first draft of this document. Promoting that harness to the
+production prompt assembly settled it, and the answer was three different things
+wearing one costume:
+
+1. **Two were over-strict assertions.** They pinned a *tool name* where two
+   tools produce the same user-visible result. The model consistently picks the
+   other one — with the thin prompt and with the full one. Rewritten to assert
+   the outcome, they pass.
+2. **One was the test harness lying to the model.** Its tool-response simulator
+   returned "a card is now on the learner's screen" regardless of screen state,
+   while the real client returns "NOTHING was shown" when the screen is hidden.
+   The harness contained the same defect as Bug 2 above — in the *test* this
+   time, which is why the test could never reproduce Bug 2's class of failure.
+3. **One was a real, frequent bug the first two were masking.** With the
+   simulator corrected, the model still failed: in hands-free mode it announces
+   *"I'll put it on your screen"* **while calling the tool**, one round before
+   the response tells it nothing was shown. Live speech streams as it is
+   generated, so that promise is already in the user's ear — and no screen ever
+   lights up. Fixed with an explicit rule and now green.
+
+Final: **44 pass / 0 fail**, from what had been filed as an immovable baseline.
+
+The takeaway is not that the tool found these. It is that *"we know those four,
+they're flaky"* was a story the team told itself for weeks, and one honest
+question — *is the test even sending what production sends?* — dissolved it.
 
 ---
 
