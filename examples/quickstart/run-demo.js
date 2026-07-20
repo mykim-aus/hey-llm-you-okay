@@ -72,7 +72,14 @@ try {
   console.log("\n" + "═".repeat(70));
   console.log(" STEP 4 — capture a production complaint into the corpus ledger");
   console.log("═".repeat(70));
-  heyllm(["capture", "환불 규정 알려달라니까 자꾸 딴소리를 해요", "--tags", "prod,refund", "--note", "CS ticket #4821"]);
+  heyllm([
+    "capture",
+    "it keeps going off-topic when I ask about the refund policy",
+    "--tags",
+    "prod,refund",
+    "--note",
+    "CS ticket #4821",
+  ]);
   heyllm(["validate"]);
 
   console.log("\n✅ demo complete — pyramid, gates, judge, triage(MODEL-DRIFT), capture all live.");

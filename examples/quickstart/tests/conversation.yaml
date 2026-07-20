@@ -1,21 +1,21 @@
-# 2. 대화 흐름 및 일관성 (Conversation & Flow)
+# 2. Conversation & Flow
 kind: llm
 cases:
-  - name: coffee-order-keeps-context   # 이전 맥락 유지 — 멀티턴
+  - name: coffee-order-keeps-context   # keeps earlier context across turns
     tags: [conversation]
     system: file:../prompts/chatbot.txt
     conversation:
-      - user: "커피 하나 주문해 줘"
-        expect: { text: { $contains: "사이즈" } }
-      - user: "가장 큰 걸로"
+      - user: "please order me a coffee"
+        expect: { text: { $contains: "size" } }
+      - user: "make it the largest one"
     expect:
-      text: { $contains: ["라지", "주문 완료"] }
+      text: { $contains: ["large", "Order complete"] }
 
-  - name: topic-switch                  # 주제 전환
+  - name: topic-switch                  # switching topics mid-conversation
     tags: [conversation]
     system: file:../prompts/chatbot.txt
     conversation:
-      - user: "오늘 날씨 알려줘"
-      - user: "근데 회사 연차 규정은 어떻게 돼?"
+      - user: "what is the weather today?"
+      - user: "by the way, what is the company annual leave policy?"
     expect:
-      text: { $contains: "연차" }
+      text: { $contains: "Annual leave" }

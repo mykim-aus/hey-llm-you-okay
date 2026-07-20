@@ -26,6 +26,7 @@ import type {
   ToolCall,
 } from "../types.js";
 import { deepGet, interpolateDeep, resolveRef } from "../util.js";
+import { runDispatchBlock } from "./dispatch.js";
 
 const toArr = (v: unknown): string[] => (v === undefined ? [] : Array.isArray(v) ? v : [v as string]);
 
@@ -158,13 +159,40 @@ export function checkLlmExpect(
               message: `expected tool '${name}' to be called; called: ${JSON.stringify(actual.toolNames)}`,
             });
         break;
-      case "anyToolCalled":
-        if (!toArr(spec).some((n) => actual.toolNames.includes(n)))
+      case "anyToolCalled": {
+        // Two forms:
+        //   anyToolCalled: [a, b]                    — at least one was called
+        //   anyToolCalled: { names: [a, b], args: {} } — ...and THAT call's args match
+        // The second form exists because equivalent tools are a real pattern:
+        // when two tools produce the same user-visible outcome, the test should
+        // assert the outcome (grounded by case number) rather than force one
+        // arbitrary branch.
+        const isObj = !Array.isArray(spec) && typeof spec === "object" && spec !== null;
+        const names = toArr(isObj ? (spec as any).names : spec);
+        const hit = actual.toolCalls.filter((c) => names.includes(c.name));
+        if (!hit.length) {
           failures.push({
             path: "anyToolCalled",
-            message: `expected one of ${JSON.stringify(toArr(spec))}; called: ${JSON.stringify(actual.toolNames)}`,
+            message: `expected one of ${JSON.stringify(names)}; called: ${JSON.stringify(actual.toolNames)}`,
           });
+          break;
+        }
+        const argSpec = isObj ? (spec as any).args : undefined;
+        if (argSpec !== undefined) {
+          // pass if ANY matching call satisfies the args
+          const ok = hit.some((c) => {
+            const f: Failure[] = [];
+            matchValue(argSpec, c.args, "args", f);
+            return f.length === 0;
+          });
+          if (!ok) {
+            const f: Failure[] = [];
+            matchValue(argSpec, hit[0].args, `anyToolCalled(${hit[0].name}).args`, f);
+            failures.push(...f);
+          }
+        }
         break;
+      }
       case "notToolCalled":
         for (const name of toArr(spec))
           if (actual.toolNames.includes(name))
@@ -258,12 +286,23 @@ export async function runLlmCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult>
   const maxRounds = cs.maxRounds ?? 3;
 
   const attempts: AttemptResult[] = [];
+  let dispatchState: unknown;
+  let dispatchEffects: unknown[] | undefined;
   for (let i = 0; i < repeat; i++) {
     const failures: Failure[] = [];
     try {
       const out = await produceLlm(provider, inputs, { maxRounds, perTurnFailures: failures });
       const actual = buildActual(out);
       checkLlmExpect(cs.expect, actual, failures);
+      // the chain does not end at the model: fold its calls through the app's
+      // reducer and assert the state the user would actually have seen
+      if (cs.dispatch) {
+        const outcome = await runDispatchBlock(cs.dispatch, actual.toolCalls, ctx, failures);
+        if (outcome) {
+          dispatchState = outcome.state;
+          dispatchEffects = outcome.effects;
+        }
+      }
       attempts.push({ ok: !failures.length, failures, toolNames: actual.toolNames, text: actual.text });
     } catch (e: any) {
       attempts.push({ ok: false, failures: [{ path: "provider", message: e.message }] });
@@ -283,6 +322,7 @@ export async function runLlmCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult>
     ok,
     failures,
     detail: { attempts: attempts.length, passed, toolNames: attempts.at(-1)?.toolNames },
+    ...(cs.dispatch ? { dispatchState, dispatchEffects } : {}),
     resolvedInputs: inputs, // triage snapshots exactly what was sent
     attemptsDetail: attempts,
   };

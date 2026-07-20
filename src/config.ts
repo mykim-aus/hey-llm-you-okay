@@ -17,7 +17,7 @@ import YAML from "yaml";
 import { glob, isPlainObject, loadEnvFile } from "./util.js";
 import type { CaseDef, HeyLLMConfig, LayerConfig, LayerKind, ProviderConfig, ProviderKind } from "./types.js";
 
-export const LAYER_KINDS: LayerKind[] = ["static", "exec", "http", "llm", "judge"];
+export const LAYER_KINDS: LayerKind[] = ["static", "exec", "http", "llm", "judge", "dispatch"];
 export const PROVIDER_KINDS: ProviderKind[] = ["openai-compatible", "anthropic", "gemini", "command"];
 
 export class ConfigError extends Error {}
@@ -161,8 +161,9 @@ const KIND_KEYS: Record<string, string[]> = {
   static: ["file", "files", "mustExist", "forbid", "require", "jsonValid", "yamlValid", "maxBytes"],
   exec: ["command", "cwd", "env", "timeoutMs"],
   http: ["request", "save"],
-  llm: ["system", "prompt", "messages", "conversation", "tools", "toolResponses", "params", "maxRounds", "repeat", "passRate"],
-  judge: ["input", "output", "transcript", "context", "rubric", "scale", "votes", "threshold", "minScores", "judgeParams"],
+  llm: ["system", "prompt", "messages", "conversation", "tools", "toolResponses", "params", "maxRounds", "repeat", "passRate", "dispatch"],
+  judge: ["input", "output", "transcript", "context", "rubric", "scale", "votes", "threshold", "minScores", "judgeParams", "reliability"],
+  dispatch: ["module", "export", "initialState", "calls"],
 };
 
 /**
@@ -222,11 +223,17 @@ export function validateCases(layer: LayerConfig, groups: CaseGroup[]): string[]
         case "llm":
           need(cs.prompt || cs.messages || cs.conversation, g.file, cs, "needs 'prompt', 'messages' or 'conversation'");
           break;
+        case "dispatch":
+          need(cs.module, g.file, cs, "needs 'module' (path to the reducer, relative to this file)");
+          need(Array.isArray(cs.calls) && cs.calls.length, g.file, cs, "needs a non-empty 'calls' array");
+          break;
         case "judge":
           need(Array.isArray(cs.rubric) && cs.rubric.length, g.file, cs, "needs a non-empty 'rubric'");
           need(cs.input || cs.output || cs.transcript, g.file, cs, "needs 'input' (subject call), 'output' or 'transcript'");
-          for (const r of cs.rubric || [])
+          for (const r of cs.rubric || []) {
             need(r.id && r.question, g.file, cs, "every rubric item needs 'id' and 'question'");
+            need(!r.ask || ["scale", "binary"].includes(r.ask), g.file, cs, `rubric '${r.id}': ask must be 'scale' or 'binary'`);
+          }
           break;
       }
     }

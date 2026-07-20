@@ -17,18 +17,19 @@ settings:
   capture: { file: tests/captured.yaml }
 
 layers:
-  # 1층 — 정적 검사: 프롬프트 파일 오타/필수 섹션 (ms, 무료)
+  # Tier 1 — static checks: prompt-file typos and required sections (ms, free)
   - name: static
     kind: static
     include: tests/static.yaml
 
-  # 2층 — HTTP 통합: 앱 API의 인증/오류 경로 (결정적)
+  # Tier 2 — HTTP integration: the app API's auth and error paths (deterministic)
   - name: api
     kind: http
     include: tests/http.yaml
 
-  # 3층 — LLM 행동: 툴 호출·대화 흐름·문구를 결정적으로 단언
-  # (데모 서버는 결정적이라 gate 가능 — 실모델에선 repeat/passRate와 함께 신중히)
+  # Tier 3 — LLM behavior: deterministic assertions on tool calls, flow and wording
+  # (the demo server is deterministic so gating is safe here — with a real model,
+  #  gate carefully and pair it with repeat/passRate)
   - name: behavior
     kind: llm
     provider: subject
@@ -39,7 +40,7 @@ layers:
       - tests/captured.yaml
     repeat: 1
 
-  # 4층 — LLM 심판: 신뢰성/보안은 루브릭으로 채점 (가장 비싼 층, 마지막)
+  # Tier 4 — LLM-as-a-judge: reliability and security scored by rubric (priciest, last)
   - name: quality
     kind: judge
     subject: subject

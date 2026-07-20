@@ -1,27 +1,27 @@
-# 1. 기능 및 정확성 (Functional & Accuracy)
+# 1. Functional & Accuracy
 kind: llm
 cases:
-  - name: weather-uses-tool          # 기본 정보 질의 — 도구 호출 + 근거 기반 응답
+  - name: weather-uses-tool          # basic factual query — calls the tool, grounds the answer on it
     tags: [functional]
     system: file:../prompts/chatbot.txt
-    prompt: "오늘 날씨 어때?"
+    prompt: "what is the weather today?"
     tools: file:../fixtures/tools.json
     toolResponses:
-      get_weather: { city: "서울", temp: 23, sky: "맑음" }
+      get_weather: { city: "Seoul", temp: 23, sky: "clear" }
     expect:
       toolCalled: get_weather
-      text: { $contains: ["23", "맑음"] }
+      text: { $contains: ["23", "clear"] }
 
-  - name: rag-cites-source           # 문서 기반 질의(RAG) — 출처 표기
+  - name: rag-cites-source           # document-grounded query (RAG) — must cite its source
     tags: [functional, rag]
     system: file:../prompts/chatbot.txt
-    prompt: "회사 연차 규정에 대해 알려줘"
+    prompt: "tell me about the company annual leave policy"
     expect:
-      text: { $all: [{ $contains: "15일" }, { $pattern: "출처" }] }
+      text: { $all: [{ $contains: "15 days" }, { $pattern: "Source" }] }
 
-  - name: translation-request        # 다국어 지원
+  - name: translation-request        # multilingual support
     tags: [functional, i18n]
     system: file:../prompts/chatbot.txt
-    prompt: "이메일 번역해 줘: Hi, can we move the meeting to tomorrow?"
+    prompt: "translate this email: Hi, can we move the meeting to tomorrow?"
     expect:
-      text: { $contains: "번역" }
+      text: { $contains: "Translation" }

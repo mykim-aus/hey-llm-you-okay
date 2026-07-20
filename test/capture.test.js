@@ -42,7 +42,7 @@ layers:
   await writeFile(path.join(dir, "tests/base.yaml"), `cases: [{ name: base, prompt: hi, expect: { text: echo } }]`);
 
   const config = await loadConfig(path.join(dir, "heyllm.yaml"));
-  const res = await captureCase(config, "프로덕션에서 오탐이 났던 문장입니다", {
+  const res = await captureCase(config, "the sentence that went wrong in production", {
     tags: ["prod-report"],
     note: "user #4821 complaint",
   });
@@ -50,10 +50,10 @@ layers:
 
   const ledger = await readFile(res.file, "utf8");
   assert.match(ledger, /prod-report/);
-  assert.match(ledger, /오탐이 났던 문장/);
+  assert.match(ledger, /went wrong in production/);
 
   // second capture same day → -02
-  const res2 = await captureCase(config, "두 번째 수집", {});
+  const res2 = await captureCase(config, "second capture", {});
   assert.match(res2.caseName, /-02$/);
 
   // the ledger is immediately part of the pyramid

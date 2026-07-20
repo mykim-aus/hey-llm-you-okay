@@ -5,8 +5,8 @@
  *   [RUBRIC] in last user msg      → judge mode: ids containing "strict" score 3,
  *                                    others 9; if the evaluated response contains
  *                                    BADWORD every id scores 3.
- *   tools present + "날씨" in msg   → tool_call get_weather({city:"서울"});
- *                                    after a tool result → "서울은 맑음입니다"
+ *   tools present + "weather" in msg → tool_call get_weather({city:"Seoul"});
+ *                                    after a tool result → "Seoul is clear"
  *   "FLAKY" in last user msg       → 1st call per unique prompt fails ("NOPE"),
  *                                    later calls pass ("MAGIC")
  *   system contains SAY: <word>    → replies exactly <word>
@@ -70,6 +70,29 @@ export function startMockLLM() {
 
         // judge mode
         if (lastUser.includes("[RUBRIC]")) {
+          // UNSTABLE marker: return a wildly different score each call so the
+          // reliability gate can be exercised deterministically.
+          if (lastUser.includes("UNSTABLE")) {
+            const ids = [...lastUser.matchAll(/^- \[([a-zA-Z0-9_-]+)\]/gm)].map((m) => m[1]);
+            const n = (state.counters.get("unstable") || 0) + 1;
+            state.counters.set("unstable", n);
+            const val = n % 2 === 1 ? 2 : 10;
+            return reply(JSON.stringify({ scores: Object.fromEntries(ids.map((i) => [i, val])), reasoning: "unstable mock" }));
+          }
+          // binary rubric: "(yes/no)" appears in the rubric line
+          if (/\(yes\/no\)/.test(lastUser)) {
+            const ids = [...lastUser.matchAll(/^- \[([a-zA-Z0-9_-]+)\]/gm)].map((m) => m[1]);
+            const evalSec = lastUser.split("[RESPONSE UNDER EVALUATION]")[1] || "";
+            const bad = evalSec.includes("BADWORD");
+            const out = { scores: Object.fromEntries(ids.map((i) => [i, !bad])), reasoning: "binary mock" };
+            if (/"spans"/.test(lastUser)) {
+              // quote a real substring when present, a fake one when asked to
+              out.spans = Object.fromEntries(
+                ids.map((i) => [i, evalSec.includes("BADWORD") ? "BADWORD" : "NOT-IN-OUTPUT-AT-ALL"])
+              );
+            }
+            return reply(JSON.stringify(out));
+          }
           const ids = [...lastUser.matchAll(/^- \[([a-zA-Z0-9_-]+)\]/gm)].map((m) => m[1]);
           const evalSection = lastUser.split("[RESPONSE UNDER EVALUATION]")[1] || "";
           const bad = evalSection.includes("BADWORD");
@@ -82,13 +105,13 @@ export function startMockLLM() {
         // tool mode
         if (payload.tools?.length) {
           const sawToolResult = messages.some((m) => m.role === "tool");
-          if (sawToolResult) return reply("서울은 맑음입니다");
-          if (lastUser.includes("날씨"))
+          if (sawToolResult) return reply("Seoul is clear");
+          if (lastUser.includes("weather"))
             return reply(null, [
               {
                 id: "call_1",
                 type: "function",
-                function: { name: "get_weather", arguments: JSON.stringify({ city: "서울" }) },
+                function: { name: "get_weather", arguments: JSON.stringify({ city: "Seoul" }) },
               },
             ]);
         }

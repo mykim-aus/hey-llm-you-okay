@@ -34,6 +34,8 @@ test("`heyllm init` scaffold actually runs (file: refs resolve from the case fil
 });
 
 test("exec layer preserves multi-byte output (chunk-boundary safe)", async () => {
+  // Deliberately multi-byte: a 3-byte-per-char string is what makes a chunk
+  // boundary land mid-character. An ASCII string would never exercise this.
   const long = "한글출력테스트".repeat(12000); // ≫ 64KB, splits mid-character
   const dir = await scaffold({
     "heyllm.yaml": `
@@ -82,7 +84,7 @@ layers:
     "tests/captured.yaml": broken,
   });
   const config = await loadConfig(path.join(dir, "heyllm.yaml"));
-  await assert.rejects(() => captureCase(config, "새 입력"), /not valid YAML|refusing to overwrite/);
+  await assert.rejects(() => captureCase(config, "new input"), /not valid YAML|refusing to overwrite/);
   assert.equal(await readFile(path.join(dir, "tests/captured.yaml"), "utf8"), broken); // untouched
 });
 

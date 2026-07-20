@@ -90,7 +90,7 @@ export interface ProviderConfig {
   cwd?: string;
 }
 
-export type LayerKind = "static" | "exec" | "http" | "llm" | "judge";
+export type LayerKind = "static" | "exec" | "http" | "llm" | "judge" | "dispatch";
 
 export interface Scale {
   min: number;
@@ -107,6 +107,31 @@ export interface RubricItem {
   id: string;
   question: string;
   weight?: number;
+  /** "scale" (default, min..max) or "binary" (pass/fail). Binary removes the
+   *  grey zone that makes judges disagree on fuzzy surface properties. */
+  ask?: "scale" | "binary";
+  /** require the judge to quote the exact violating span from the output; the
+   *  quote is verified against the real text, so fabricated evidence is
+   *  discarded instead of scored */
+  citeSpan?: boolean;
+}
+
+/** Judge trustworthiness gate. A verdict nobody can reproduce is not a verdict. */
+export interface ReliabilityConfig {
+  /** max allowed spread (max-min) across votes before the verdict is refused */
+  maxSpread?: number;
+  /** set false to score anyway and only warn */
+  enforce?: boolean;
+}
+
+/** How a model response is folded into application state. */
+export interface DispatchSpec {
+  /** path to a module exporting the reducer, relative to the case file */
+  module: string;
+  /** named export to use (default: the default export) */
+  export?: string;
+  initialState?: unknown;
+  expect?: Record<string, unknown>;
 }
 
 /** A case is YAML-authored; `name` is the only universally required field. */
@@ -137,6 +162,7 @@ export interface LayerConfig {
   threshold?: number;
   scale?: Scale;
   judgeParams?: JudgeParams;
+  reliability?: ReliabilityConfig;
   /** enable score-regression checks against the baseline file */
   baseline?: boolean;
   maxDrop?: number;
@@ -188,6 +214,15 @@ export interface VoteResult {
   weighted: number;
   scores: Record<string, number>;
   reasoning: string;
+  /** quoted evidence per rubric id (citeSpan), already verified against output */
+  spans?: Record<string, string>;
+}
+
+/** Per-rubric-item vote agreement — the number nobody else reports. */
+export interface AgreementReport {
+  spread: number;
+  perItem: Record<string, { min: number; max: number; spread: number }>;
+  worstItem: string | null;
 }
 
 export interface AttemptResult {
@@ -222,6 +257,12 @@ export interface CaseResult {
   score?: number;
   scale?: Scale;
   votes?: VoteResult[];
+  agreement?: AgreementReport;
+  /** the judges disagreed too much to trust the score — this is NOT a pass */
+  inconclusive?: string;
+  /** dispatch layer / block */
+  dispatchState?: unknown;
+  dispatchEffects?: unknown[];
   output?: string;
   /** exec layer failure context */
   outputTail?: string;

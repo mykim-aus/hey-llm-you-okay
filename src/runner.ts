@@ -16,6 +16,7 @@ import { runExecCase } from "./layers/exec.js";
 import { runHttpCase } from "./layers/http.js";
 import { runLlmCase } from "./layers/llm.js";
 import { runJudgeCase } from "./layers/judge.js";
+import { runDispatchCase } from "./layers/dispatch.js";
 import {
   caseKey,
   checkRegression,
@@ -45,11 +46,13 @@ const RUNNERS: Record<LayerKind, (cs: CaseDef, ctx: CaseCtx) => Promise<CaseResu
   http: runHttpCase,
   llm: runLlmCase,
   judge: runJudgeCase,
+  dispatch: runDispatchCase,
 };
 
 // http defaults to 1 (save-chaining is sequential); llm/judge stay low for rate limits
 const DEFAULT_CONCURRENCY: Record<LayerKind, number> = {
   static: 8,
+  dispatch: 8,
   exec: 1,
   http: 1,
   llm: 2,

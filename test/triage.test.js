@@ -133,11 +133,11 @@ layers:
     env: [HEYLLM_TEST_WORD]   # declared → interpolatable (no blanket env fallback)
     cases:
       - name: quality
-        input: { system: "SAY: {{HEYLLM_TEST_WORD}}", prompt: "질문" }
-        rubric: [{ id: helpful, question: "도움?" }]
+        input: { system: "SAY: {{HEYLLM_TEST_WORD}}", prompt: "question" }
+        rubric: [{ id: helpful, question: "helpful?" }]
 `.replaceAll("{{MOCK}}", mock.base)
   );
-  process.env.HEYLLM_TEST_WORD = "좋은답변"; // mock judge scores 9
+  process.env.HEYLLM_TEST_WORD = "GOOD-ANSWER"; // mock judge scores 9
   const green = await run(dir, { updateBaseline: true });
   assert.equal(green.layers[0].cases[0].result.score, 9);
 

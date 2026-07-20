@@ -106,16 +106,16 @@ layers:
     provider: m
     cases:
       - name: weather-tool
-        prompt: "오늘 서울 날씨 어때?"
+        prompt: "what is the weather in Seoul today?"
         tools: file:fixtures/tools.json
         toolResponses:
-          get_weather: { temp: 23, sky: "맑음" }
+          get_weather: { temp: 23, sky: "clear" }
         expect:
           toolCalled: get_weather
-          toolArgs: { get_weather: { city: 서울 } }
-          text: { $contains: "맑음" }
+          toolArgs: { get_weather: { city: Seoul } }
+          text: { $contains: "clear" }
       - name: no-tool-smalltalk
-        prompt: "안녕!"
+        prompt: "hello!"
         tools: file:fixtures/tools.json
         expect: { notToolCalled: [get_weather], text: { $contains: "echo" } }
 `,
@@ -145,10 +145,10 @@ layers:
     cases:
       - name: flow
         conversation:
-          - user: "커피 주문할게"
-            expect: { text: { $contains: "커피" } }
-          - user: "가장 큰 걸로"
-        expect: { text: { $contains: "가장 큰 걸로" } }
+          - user: "I would like to order a coffee"
+            expect: { text: { $contains: "coffee" } }
+          - user: "make it the largest one"
+        expect: { text: { $contains: "the largest one" } }
 `);
   const s = await run(dir);
   assert.equal(caseOf(s, "b", "flow").result.ok, true, JSON.stringify(caseOf(s, "b", "flow").result.failures));
@@ -189,26 +189,26 @@ layers:
     votes: 3
     cases:
       - name: good-output
-        input: { system: "SAY: 좋은답변", prompt: "질문" }
+        input: { system: "SAY: GOOD-ANSWER", prompt: "question" }
         rubric:
-          - { id: helpful, question: "도움이 되는가?", weight: 3 }
-          - { id: safe, question: "안전한가?" }
+          - { id: helpful, question: "is it helpful?", weight: 3 }
+          - { id: safe, question: "is it safe?" }
         threshold: 7
       - name: bad-output-fails-threshold
-        input: { system: "SAY: BADWORD", prompt: "질문" }
-        rubric: [{ id: helpful, question: "도움이 되는가?" }]
+        input: { system: "SAY: BADWORD", prompt: "question" }
+        rubric: [{ id: helpful, question: "is it helpful?" }]
         threshold: 7
       - name: weighted-mix
-        input: { system: "SAY: 무난한답변", prompt: "질문" }
+        input: { system: "SAY: PLAIN-ANSWER", prompt: "question" }
         rubric:
-          - { id: helpful, question: "도움?", weight: 3 }      # mock: 9
-          - { id: strict-format, question: "형식?", weight: 1 } # mock: 3 (id contains "strict")
+          - { id: helpful, question: "helpful?", weight: 3 }      # mock: 9
+          - { id: strict-format, question: "format?", weight: 1 } # mock: 3 (id contains "strict")
         threshold: 7   # weighted = (9*3+3*1)/4 = 7.5 → pass
       - name: minscore-floor
-        input: { system: "SAY: 무난한답변", prompt: "질문" }
+        input: { system: "SAY: PLAIN-ANSWER", prompt: "question" }
         rubric:
-          - { id: helpful, question: "도움?" }
-          - { id: strict-format, question: "형식?" }
+          - { id: helpful, question: "helpful?" }
+          - { id: strict-format, question: "format?" }
         minScores: { strict-format: 5 }   # mock scores 3 → fail
 `);
   const s = await run(dir);
@@ -285,7 +285,7 @@ layers:
         expect: { text: EXECMAGIC }
 `,
     {
-      // 호출될 때마다 부수효과 파일에 줄을 추가 — memoization이면 repeat×라운드에도 1줄
+      // appends a line per invocation — if memoized, one line even across repeat×rounds
       "build-prompt.mjs": `
 import { appendFileSync } from "node:fs";
 appendFileSync("calls.log", "x\\n");
@@ -315,10 +315,10 @@ layers:
     cases:
       - name: c
         input:
-          prompt: "오늘 날씨 어때?"
+          prompt: "what is the weather today?"
           tools: file:fixtures/tools.json
           ${params}
-        rubric: [{ id: helpful, question: "도움?" }]
+        rubric: [{ id: helpful, question: "helpful?" }]
 `;
   const tools = {
     "fixtures/tools.json": JSON.stringify([
@@ -335,9 +335,9 @@ layers:
 
   // (b) toolResponseDefault lets the turn continue to real text
   const withDefault = await run(
-    await scaffold(mk(`params: { toolResponseDefault: { city: "서울", temp: 23, sky: "맑음" } }`), tools)
+    await scaffold(mk(`params: { toolResponseDefault: { city: "Seoul", temp: 23, sky: "clear" } }`), tools)
   );
   const ok = caseOf(withDefault, "q", "c").result;
   assert.equal(ok.ok, true, JSON.stringify(ok.failures));
-  assert.match(ok.output, /맑음/);
+  assert.match(ok.output, /clear/);
 });

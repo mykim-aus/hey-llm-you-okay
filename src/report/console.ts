@@ -2,7 +2,7 @@
  * Console reporter — the default human-facing output.
  */
 import type { LayerRunResult, RunSummary, TriageReport } from "../types.js";
-import { c, ms } from "../util.js";
+import { c, ms, truncate } from "../util.js";
 
 const MARK = { pass: c.green("✓"), fail: c.red("✗"), skip: c.yellow("○") };
 
@@ -31,9 +31,26 @@ export function printLayer(layer: LayerRunResult, verbose: boolean): void {
       console.log(`  ${MARK.skip} ${r.name} ${c.dim(`(${r.result.skipped})`)}`);
       continue;
     }
+    // A verdict the judges could not reproduce is neither a pass nor a fail.
+    if (r.result.inconclusive) {
+      const a = r.result.agreement;
+      console.log(
+        `  ${c.yellow("?")} ${c.bold(r.name)} ${c.yellow("INCONCLUSIVE")}` +
+          (a ? c.dim(` (votes spread ${a.spread}${a.worstItem ? `, worst: ${a.worstItem}` : ""})`) : "")
+      );
+      console.log(`      ${c.yellow("↳")} ${r.result.inconclusive}`);
+      if (verbose && r.result.votes)
+        for (const [i, v] of r.result.votes.entries())
+          console.log(c.dim(`      vote[${i}] ${v.weighted} ${JSON.stringify(v.scores)}`));
+      continue;
+    }
+    const agree = r.result.agreement;
     const scoreTag =
       r.result.score !== undefined
-        ? c.cyan(` ${r.result.score}/${r.result.scale?.max ?? 10}`)
+        ? c.cyan(` ${r.result.score}/${r.result.scale?.max ?? 10}`) +
+          (agree && (r.result.votes?.length ?? 0) > 1
+            ? c.dim(agree.spread === 0 ? " ±0" : ` ±${agree.spread}`)
+            : "")
         : "";
     if (r.result.ok) {
       if (verbose) console.log(`  ${MARK.pass} ${r.name}${scoreTag} ${c.dim(ms(r.durationMs))}`);
@@ -45,9 +62,14 @@ export function printLayer(layer: LayerRunResult, verbose: boolean): void {
       if (r.result.outputTail) console.log(c.dim(indent(r.result.outputTail.slice(-1200), 6)));
     }
     if (verbose && r.result.votes?.length) {
-      for (const [i, v] of r.result.votes.entries())
+      for (const [i, v] of r.result.votes.entries()) {
         console.log(c.dim(`      vote[${i}] ${v.weighted} ${JSON.stringify(v.scores)} — ${v.reasoning}`));
+        for (const [id, span] of Object.entries(v.spans || {}))
+          console.log(c.dim(`         evidence[${id}] ${span}`));
+      }
     }
+    if (verbose && r.result.dispatchState !== undefined)
+      console.log(c.dim(`      dispatch → state ${truncate(JSON.stringify(r.result.dispatchState), 160)}`));
   }
 }
 

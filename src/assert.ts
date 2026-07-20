@@ -193,7 +193,7 @@ export interface GenericActual {
  * Apply a case-level `expect` block against a layer's actual shape.
  * Generic keys: status, exitCode, json, jsonPath, text, stdout, stderr, headers.
  * text/stdout/stderr accept a bare string as $contains shorthand.
- * Layer-specific keys (toolCalled 등) must be consumed by the layer BEFORE
+ * Layer-specific keys (toolCalled and friends) must be consumed by the layer BEFORE
  * delegating here — unknown keys fail loudly (a typo must not silently pass).
  */
 /** `{$exists: false}` is the one spec that may legitimately assert absence. */
