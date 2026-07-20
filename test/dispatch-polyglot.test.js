@@ -179,10 +179,9 @@ test("mode validation: both/neither/stray keys/shell-looking command", async () 
   const layer = config.layers[0];
   const problems = validateCases(layer, await loadLayerCases(layer, config.baseDir));
   assert.ok(problems.some((p) => /both 'module' and 'command'/.test(p)));
-  // the existing config test matches on this literal — keep it exactly one problem
-  const neither = problems.filter((p) => /neither/.test(p));
-  assert.equal(neither.length, 1, "neither-mode must produce exactly one problem");
-  assert.match(neither[0], /needs 'module'/);
+  // neither-mode reports the mode problem (it also lacks expect, reported separately)
+  const neitherMode = problems.filter((p) => /neither/.test(p) && /needs 'module'/.test(p));
+  assert.equal(neitherMode.length, 1, "neither-mode must report exactly one mode problem");
   assert.ok(problems.some((p) => /args.*'command' only/.test(p)));
   assert.ok(problems.some((p) => /NOT through a shell/.test(p)));
 });
@@ -262,4 +261,27 @@ test("REGRESSION: the dispatch: block enforces the mode rules too", async () => 
     failures
   );
   assert.ok(failures.some((f) => /both 'module' and 'command'/.test(f.message)), "mode rules must apply to the embedded block");
+});
+
+test("REGRESSION: a dispatch case with no expect fails on RUN, not just validate", async () => {
+  const dir = await project(LAYER(`      - name: no-expect
+        module: ./reducer.cjs
+        initialState: { x: 1 }
+        calls: [{ name: tap }]`));
+  await writeFile(path.join(dir, "reducer.cjs"), "export default (s)=>s;");
+  const r = caseOf(await run(dir), "no-expect").result;
+  assert.equal(r.ok, false, "an assertion-less dispatch case must not pass");
+  assert.match(r.failures[0].message, /needs 'expect'/);
+});
+
+test("REGRESSION: a typo'd expct: is caught on run (not silently dropped)", async () => {
+  const dir = await project(LAYER(`      - name: typo
+        module: ./reducer.cjs
+        initialState: { x: 1 }
+        calls: [{ name: tap }]
+        expct: { state: { x: 999 } }`));
+  await writeFile(path.join(dir, "reducer.cjs"), "export default (s)=>s;");
+  const r = caseOf(await run(dir), "typo").result;
+  assert.equal(r.ok, false, "a typo'd assertion key must fail, not pass having checked nothing");
+  assert.match(r.failures[0].message, /expect/);
 });

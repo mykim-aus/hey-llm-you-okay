@@ -287,6 +287,34 @@ export function checkDispatchMode(spec: Record<string, any>): string | null {
   return null;
 }
 
+// The keys a dispatch spec / block may carry. An unknown key is almost always a
+// typo (`expct:`), and silently dropping it discards the assertion — a green
+// tick for a check that never ran.
+const DISPATCH_BLOCK_KEYS = new Set(["module", "export", "command", "args", "cwd", "env", "timeoutMs", "initialState", "expect", "calls"]);
+
+/**
+ * Validate a dispatch spec (or the embedded `dispatch:` block) at RUN time — the
+ * unknown-key and missing-`expect` checks in validateCases only run under
+ * `heyllm validate`, and `heyllm run` never calls it. Returns one message, or
+ * null. `embedded` = the `dispatch:` block on an llm case, whose calls come from
+ * the model, so it has no `calls:` key of its own.
+ */
+export function checkDispatchSpec(spec: Record<string, any>, embedded: boolean): string | null {
+  const mode = checkDispatchMode(spec);
+  if (mode) return mode;
+  const allowed = embedded ? DISPATCH_BLOCK_KEYS : DISPATCH_BLOCK_KEYS;
+  for (const k of Object.keys(spec))
+    if (!allowed.has(k)) {
+      // `calls` is legal on a kind: dispatch case, not on an embedded block.
+      if (k === "calls" && !embedded) continue;
+      const near = k === "expct" || k === "expects" ? " (did you mean 'expect'?)" : "";
+      return `unknown dispatch key '${k}'${near} — a typo'd key is silently dropped, which would discard the assertion`;
+    }
+  if (spec.expect === undefined)
+    return "needs 'expect' — a dispatch case with no assertion passes without verifying anything";
+  return null;
+}
+
 /** Fold calls through the reducer, accumulating state and effects. */
 export async function foldCalls(reduce: Reducer, initialState: unknown, calls: DispatchCall[]): Promise<DispatchOutcome> {
   let state = initialState;
@@ -330,12 +358,13 @@ export async function runDispatchBlock(
   ctx: CaseCtx,
   failures: Failure[]
 ): Promise<DispatchOutcome | null> {
-  // The mode rules run for the llm-embedded block too. They were only applied
-  // by validateCases (kind: dispatch cases), so a `dispatch:` block with both
-  // module: and command:, or with neither, was accepted here silently.
-  const modeProblem = checkDispatchMode(spec);
-  if (modeProblem) {
-    failures.push({ path: "dispatch", message: modeProblem });
+  // Full spec validation runs for the llm-embedded block too. validateCases
+  // covers kind: dispatch cases only, and it never runs under `heyllm run` — so
+  // a block with both modes, or a typo'd `expct:` that discards the assertion,
+  // was accepted here silently.
+  const specProblem = checkDispatchSpec(spec as any, true);
+  if (specProblem) {
+    failures.push({ path: "dispatch", message: specProblem });
     return null;
   }
   let reduce: Reducer;
@@ -397,11 +426,11 @@ export async function runDispatchCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseRe
     initialState: cs.initialState,
     expect: cs.expect,
   };
-  // Mode checks run HERE too, not only in validateCases — `heyllm run` never
-  // calls the validator, so a check that lives only there does nothing on the
-  // ordinary run path.
-  const modeProblem = checkDispatchMode(spec);
-  if (modeProblem) return { ok: false, failures: [{ path: "module", message: modeProblem }] };
+  // Mode + required-expect run HERE too, not only in validateCases — `heyllm
+  // run` never calls the validator. A no-expect case (or a typo'd `expct:`,
+  // which leaves spec.expect undefined) is a green tick that checked nothing.
+  const specProblem = checkDispatchSpec({ ...spec, calls }, false);
+  if (specProblem) return { ok: false, failures: [{ path: "dispatch", message: specProblem }] };
   let reduce: Reducer;
   try {
     reduce = await makeReducer(spec, ctx.baseDir);

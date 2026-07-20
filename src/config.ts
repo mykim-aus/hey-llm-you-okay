@@ -319,6 +319,10 @@ export function validateCases(layer: LayerConfig, groups: CaseGroup[]): string[]
           const modeProblem = checkDispatchMode(cs);
           if (modeProblem) need(false, g.file, cs, modeProblem);
           need(Array.isArray(cs.calls) && cs.calls.length, g.file, cs, "needs a non-empty 'calls' array");
+          // No `expect` means the reducer runs and nothing is checked — a green
+          // tick that verified nothing, the same vacuous-pass shape as an
+          // assertion-less llm case.
+          need(cs.expect !== undefined, g.file, cs, "needs 'expect' — a dispatch case with no assertion passes without verifying anything");
           break;
         }
         case "judge":
