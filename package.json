@@ -1,6 +1,6 @@
 {
   "name": "hey-llm-you-okay",
-  "version": "0.3.0",
+  "version": "0.1.3",
   "description": "Hey LLM, you okay? — a unified, pyramid-ordered LLM testing CLI for CI/CD. YAML-defined layers (static → exec → http → llm → judge), LLM-as-a-judge gates, and an automated failure-triage protocol (A/B probe) that tells you whether a red test is your prompt's fault or model drift.",
   "type": "module",
   "bin": {
