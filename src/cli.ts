@@ -109,8 +109,23 @@ async function cmdRun(argv: Argv, forceTriage = false): Promise<number> {
     c.bold(`◆ HEYLLM`) +
       c.dim(` — ${config.layers.length} layers${config.profile ? ` · profile: ${config.profile}` : ""}`)
   );
+  // A typo'd layer name used to select zero layers and print "RESULT: PASS —
+  // 0/0 cases" with exit 0: one wrong character in a CI command turned the whole
+  // gate green while claiming to have run. Selecting nothing is never a pass.
+  const only = list(argv.flags.only);
+  if (only?.length) {
+    const known = config.layers.map((l) => l.name);
+    const unknown = only.filter((n) => !known.includes(n));
+    if (unknown.length) {
+      console.error(
+        c.red(`unknown layer${unknown.length > 1 ? "s" : ""} in --only: ${unknown.join(", ")}`)
+      );
+      console.error(c.dim(`  available: ${known.join(", ")}`));
+      return 2;
+    }
+  }
   const summary = await runSuite(config, {
-    only: list(argv.flags.only),
+    only,
     grep: argv.flags.grep as string,
     tags: list(argv.flags.tags),
     keepGoing: !!argv.flags["keep-going"],
@@ -137,6 +152,13 @@ async function cmdRun(argv: Argv, forceTriage = false): Promise<number> {
   // failing test. Exiting 1 would tell CI "your prompt broke" when the truth is
   // "we never got to ask".
   if (summary.infra?.length) return 2;
+  // Zero cases ran despite an explicit selection — the filters matched nothing.
+  // Reporting that as PASS is the quietest way to lose coverage.
+  const ranCases = summary.layers.reduce((n, l) => n + l.cases.length, 0);
+  if (ranCases === 0 && (only?.length || argv.flags.grep || argv.flags.tags)) {
+    console.error(c.red("no cases matched the given --only/--grep/--tags — nothing was measured"));
+    return 2;
+  }
   return summary.ok ? 0 : 1;
 }
 
@@ -147,7 +169,7 @@ async function cmdValidate(argv: Argv): Promise<number> {
   let problems: string[] = [];
   let total = 0;
   for (const layer of config.layers) {
-    const groups = await loadLayerCases(layer, config.baseDir);
+    const groups = await loadLayerCases(layer, config.baseDir, config.settings?.capture?.file);
     const count = groups.reduce((s, g) => s + g.cases.length, 0);
     total += count;
     problems = problems.concat(validateCases(layer, groups));

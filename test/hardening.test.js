@@ -502,3 +502,56 @@ test("bin entry: runs when invoked through a node_modules/.bin style symlink", a
   const out = execFileSync("node", [link, "--help"], { encoding: "utf8" });
   assert.match(out, /commands:/, "help must print when invoked via the bin symlink");
 });
+
+test("a typo'd --only layer name fails loudly instead of passing 0 cases", async () => {
+  // Before 0.1.5: `--only behaviour` (British spelling of a layer named
+  // `behavior`) selected nothing and printed "RESULT: PASS — 0/0 cases" with
+  // exit 0. One wrong character in a CI command turned the entire gate green
+  // while claiming to have run. Selecting nothing is never a pass.
+  const dir = await scaffold({
+    "heyllm.yaml": `
+layers:
+  - name: behavior
+    kind: exec
+    cases:
+      - { name: ok, command: "true" }
+`,
+  });
+  let code = 0;
+  let out = "";
+  try {
+    execFileSync("node", [CLI, "run", "--only", "behaviour"], { cwd: dir, stdio: "pipe" });
+  } catch (e) {
+    code = e.status;
+    out = String(e.stdout || "") + String(e.stderr || "");
+  }
+  assert.equal(code, 2, "a config/selection mistake exits 2, not 0");
+  assert.match(out, /unknown layer[s]? in --only: behaviour/);
+  assert.match(out, /available: behavior/, "must show what the valid names are");
+
+  // the correctly-spelled name still works
+  const okOut = execFileSync("node", [CLI, "run", "--only", "behavior"], { cwd: dir, stdio: "pipe" });
+  assert.match(String(okOut), /1\/1 cases/);
+});
+
+test("--grep that matches nothing does not report PASS", async () => {
+  const dir = await scaffold({
+    "heyllm.yaml": `
+layers:
+  - name: behavior
+    kind: exec
+    cases:
+      - { name: ok, command: "true" }
+`,
+  });
+  let code = 0;
+  let out = "";
+  try {
+    execFileSync("node", [CLI, "run", "--grep", "nothing-matches-this"], { cwd: dir, stdio: "pipe" });
+  } catch (e) {
+    code = e.status;
+    out = String(e.stdout || "") + String(e.stderr || "");
+  }
+  assert.equal(code, 2);
+  assert.match(out, /nothing was measured/);
+});

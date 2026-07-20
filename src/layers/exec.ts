@@ -6,9 +6,34 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { applyExpect } from "../assert.js";
+import { envFileVars } from "../util.js";
 import type { CaseCtx, CaseDef, CaseResult, Failure } from "../types.js";
 
 const CAP = 64 * 1024; // keep the tail — failures print at the end of runner output
+
+/**
+ * Exit code an exec case uses to say "I could not measure" — rate limited, the
+ * service was down, the dev server was restarting. Reported as INFRA (exit 2),
+ * never as a failing test: a rate-limited harness that reports "0/12 passed"
+ * is indistinguishable from a real regression, and that is how a green suite
+ * starts lying in the other direction too. Same reasoning as an unreachable
+ * provider — "we never got to ask" is not "your prompt broke".
+ */
+export const INFRA_EXIT = 97;
+
+/**
+ * The child gets the ambient shell environment, but NOT the vars heyllm itself
+ * loaded from `settings.envFile`, unless this layer/case names them in `env`.
+ * See the comment on envFileVars: silently handing API keys to a wrapped test
+ * runner un-skips its opt-in live tests and bills the user for it.
+ */
+function childEnv(cs: CaseDef, ctx: CaseCtx): NodeJS.ProcessEnv {
+  const declared = new Set<string>([...(ctx.layer.env || []), ...Object.keys(cs.env || {})]);
+  const out: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env))
+    if (!envFileVars.has(k) || declared.has(k)) out[k] = v;
+  return { ...out, ...(cs.env || {}) };
+}
 
 export async function runExecCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult> {
   const failures: Failure[] = [];
@@ -26,7 +51,7 @@ export async function runExecCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult
     // otherwise survive and hang the runner forever).
     const child = spawn("sh", ["-c", cs.command], {
       cwd,
-      env: { ...process.env, ...(cs.env || {}) },
+      env: childEnv(cs, ctx),
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
     });
@@ -63,6 +88,19 @@ export async function runExecCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult
     });
   });
 
+  if (actual.exitCode === INFRA_EXIT)
+    return {
+      ok: false,
+      failures: [
+        {
+          path: "command",
+          message: `could not measure (exit ${INFRA_EXIT}): ${(actual.stderr || actual.stdout).trim().slice(-300) || "no output"}`,
+          infra: true,
+        },
+      ],
+      detail: { exitCode: actual.exitCode },
+      outputTail: (actual.stderr || actual.stdout).slice(-4000),
+    };
   if (actual.timedOut) failures.push({ path: "command", message: `timed out after ${timeoutMs}ms` });
   // keys that exist on other layers but never on a process result — reject
   // loudly (copying an http/llm case into exec must not silently always-pass)

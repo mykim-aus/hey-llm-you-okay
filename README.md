@@ -336,7 +336,9 @@ tools:  "exec:node scripts/print-tool-declarations.mjs"
 
 Output is memoized per process (repeat/votes/triage arms reuse it), and triage snapshots store the **resolved** text — so code-built prompts still get full A/B drift detection.
 
-> Writing the glue script: if your script ends with `process.exit()`, flush first — `process.stdout.write(data, () => process.exit(0))`. A bare `process.exit()` truncates piped output.
+> **stdout is the value; send everything else to stderr.** An `exec:` ref takes the command's *entire* stdout as the resolved text, so a stray log line becomes part of your prompt. This bites hardest with frameworks that print a banner on import — a Python server that logs `[app] loaded 95 keys` at startup will silently prepend that to your system prompt. Route diagnostics to stderr (`print(..., file=sys.stderr)`, `console.error`), or wrap the noisy import: `with contextlib.redirect_stdout(sys.stderr): import app`.
+>
+> If your script ends with `process.exit()`, flush first — `process.stdout.write(data, () => process.exit(0))`. A bare `process.exit()` truncates piped output.
 
 ## Config: keys without manual exports
 

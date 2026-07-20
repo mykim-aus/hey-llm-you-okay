@@ -128,6 +128,77 @@ ago. It simply never was.
 
 ---
 
+## Bug 4 — The broken path was the *default* path
+
+A later session took the same suite back to the role-play mode. Tapping
+"role-play" is supposed to work like this: if the learner has already mentioned
+a scenario, open that scene in English; if not, ask them — in their own language
+— what to act out.
+
+The second branch had a test. The test was opt-in, and it was red.
+
+Two things made it worse than it looked. First, **there is no scenario picker in
+the product.** Tapping the mode card auto-sends "let's role-play!" 250 ms later,
+so "no scenario anywhere" is not an edge case — it is what happens to every user
+who taps the button. Second, what the model actually did was not what the test
+described. Measured through the real endpoint, 6 times out of 6, it invented a
+café, cast the learner as a customer, and opened in English:
+
+```
+answer:    Hello! Welcome to Moody's Cafe. What can I get for you today?
+situation: You are a customer at a cafe, and I am the barista.
+```
+
+A learner taps a button and is suddenly a customer in a café, in a language they
+are still learning, with no idea why.
+
+### The same fidelity trap, one level deeper
+
+Bug 1's fix — one shared assembly function — held. The test harness still called
+the builders directly, and that was still a different program: production wraps
+the base prompt in 13 further sections, tries a *smaller model first* for casual
+turns, and streams over SSE. Measuring through the builders and measuring through
+the route disagreed about what the bug even was:
+
+| | via the builders | via the real route |
+|---|---|---|
+| what the model did | asked for a scenario, **in English** | **invented a café** and opened in English |
+| what you would fix | the language rule | the "don't invent" rule |
+
+Extracting the assembly was necessary and not sufficient. The harness was
+rewritten to POST to the running dev server with a forged session cookie, so
+there is nothing left to reassemble.
+
+### Three findings that only measurement could have produced
+
+**A prohibition primed the thing it prohibited.** The first fix said: *"never
+open a café, an interview, a restaurant or any other scene the learner did not
+ask for."* Scenario-given cases went from 8/8 to 6/8 — the model started
+avoiding **interviews**, which is exactly the scene it was supposed to open when
+the learner had mentioned one. The negative examples leaked across the branch
+boundary. The prohibition now names no scenes at all, and a test asserts it never
+will again.
+
+**The UI decided what the prompt should say.** The fix also told the model to
+offer a tappable example in `suggestedReply`. That field renders as a card with a
+*text-to-speech button* — it exists so learners can hear an English line. Putting
+a Korean scenario request there would have been read aloud by an English voice,
+and the base prompt already said to leave it null on setup turns. Two
+instructions, in conflict, and the measurement (2 of 8 samples empty) is what
+surfaced it. Reading the component settled which one was right.
+
+**The harness could not fail correctly.** Sampling the real endpoint hit a
+production rate limit of 50 requests/hour. Twelve blocked samples were reported
+as `0/12` — identical to a total behavioural regression. A test that cannot tell
+"the model got this wrong" from "I never got an answer" will eventually lie in
+both directions. Blocked samples are now retried, then excluded from the
+denominator, and **a run that measures nothing is never green**.
+
+Final, through the production route: 24/24 across all three branches, up from
+0/6 on the branch every user hits.
+
+---
+
 ## What this is not evidence of
 
 **It is not evidence that Jest or the existing 96 files were inadequate.** They
@@ -156,9 +227,26 @@ Budget a day for a handler of this size, and expect to touch state management,
 not just add a file. The payoff is real — that layer runs on every commit with
 no model calls — but "extract a pure reducer" is a refactor, not a config change.
 
-**It is not evidence that the tool's own claims are self-verifying.** `heyllm`'s
-judge-trust gate was wrong on first release, in exactly the same shape as the
-bugs above. It measured agreement **between votes inside one run**:
+**It is not evidence that the tool's own claims are self-verifying.** Dogfooding
+kept finding `heyllm` committing the exact failure it exists to catch — reporting
+a verdict it had not earned. Four more, all fixed in 0.1.5, all with regression
+tests:
+
+| what happened | why it mattered |
+|---|---|
+| `settings.envFile` keys were inherited by `exec` children | a wrapped Jest suite whose live tests self-skip on `if (process.env.API_KEY)` **stopped skipping** — every pre-deploy run silently made paid API calls the author had gated off |
+| one bad path in a multi-item `include` was ignored | a *single* missing include already errored; a **list** swallowed the typo as long as a sibling matched, so coverage dropped to whatever was left and the run stayed green |
+| `--only behaviour` (a typo for `behavior`) selected nothing | printed `RESULT: PASS — 0/0 cases`, exit 0. One wrong character turned an entire CI gate green while claiming to have run |
+| an `exec` harness had no way to say "I could not measure" | a rate-limited run reported failures indistinguishable from a real regression |
+
+The first three are the same bug wearing different clothes: **the tool did less
+than it was told, and said nothing.** That is precisely what it asks users to
+look for in their own suites, which is the argument for dogfooding rather than
+against it — none of these surfaced in the tool's own 84-test suite until it was
+pointed at a real project.
+
+The judge-trust gate was also wrong on first release, in exactly the same shape.
+It measured agreement **between votes inside one run**:
 
 | run | votes | spread within run |
 |---|---|---|
@@ -196,10 +284,11 @@ layers:
 | Live behaviour layer, full run | **~20s**, 7 scenarios |
 | Judge layer (local CLI), full run | **~30s** |
 
-Final state, all against real APIs: `hygiene` 4/4 · `harness-pure` 4/4 ·
-`dispatch` 7/7 · `behavior` 7/7 · `quality` 9.57/10 (vote spread ±0.28, down
-from a 5.6–9.3 swing before the rubric was rewritten as request-fulfilment
-rather than surface-property matching).
+Final state, all against real APIs: `hygiene` 4/4 · `unit-jest` 845 tests ·
+`harness-pure` 4/4 · `dispatch` 7/7 · `behavior` 7/7 · `quality` 8.8–9.6/10
+(vote spread ±0.4, down from a 5.6–9.3 swing before the rubric was rewritten as
+request-fulfilment rather than surface-property matching). One command, ~70s,
+run by hand before each deploy.
 
 ### Postscript: the "known flaky baseline" was neither known nor flaky
 
@@ -235,21 +324,32 @@ question — *is the test even sending what production sends?* — dissolved it.
 
 ## The transferable lesson
 
-All four findings — three product bugs and the tool's own — are the same shape:
+Every finding here — four product bugs and five of the tool's own — is the same
+shape:
 
 > Something was measured. It just wasn't the thing that breaks.
 
 Prompt length was measured; section content was not. Tool calls were asserted;
 what the app did next was not. Vote agreement was computed; run-to-run drift was
-not. Before adding a layer, it is worth asking of every green test you already
-have: **what exactly is this comparing, and is that what ships?**
+not. An `--only` filter was honoured; whether it matched anything was not. A
+harness counted failures; whether it had received an answer at all, it did not.
+
+The uncomfortable version: **a green test and an unrun test look identical from
+the outside.** Everything above is a variation on failing to tell them apart.
+Before adding a layer, it is worth asking of every green test you already have:
+*what exactly is this comparing, and is that what ships?*
 
 ## Reproducing this on your own project
 
 1. Point one `exec` case at your existing test command. Nothing to rewrite.
 2. Add one `llm` case whose `system:` comes from the **same code path production
    uses** — `exec:` refs let you shell out to your own prompt builder.
-3. Diff the length of what your test sends against what production sends. Fix any
-   gap before trusting anything else.
+3. Diff what your test sends against what production sends. If the endpoint is
+   reachable from your test environment, skip the diff and **call the endpoint**
+   — then there is nothing to keep in sync. Fix any gap before trusting
+   anything else.
 4. Only then extract a reducer and add a `dispatch` layer. Budget a real day for
    it, and wire it in — a parallel copy is worse than nothing.
+5. Prove your harness can fail. Break the thing on purpose and confirm it goes
+   red; then block its network and confirm it says *"could not measure"* rather
+   than *"failed"*. Both directions, or you do not know what green means.

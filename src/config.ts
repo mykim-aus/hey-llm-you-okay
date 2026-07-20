@@ -14,7 +14,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import YAML from "yaml";
-import { glob, isPlainObject, loadEnvFile } from "./util.js";
+import { envFileVars, glob, isPlainObject, loadEnvFile } from "./util.js";
 import type { CaseDef, HeyLLMConfig, LayerConfig, LayerKind, ProviderConfig, ProviderKind } from "./types.js";
 
 export const LAYER_KINDS: LayerKind[] = ["static", "exec", "http", "llm", "judge", "dispatch"];
@@ -124,7 +124,8 @@ export async function loadConfig(
       ? settings.envFile
       : [settings.envFile]
     : [];
-  for (const rel of envFiles) await loadEnvFile(path.resolve(baseDir, rel));
+  for (const rel of envFiles)
+    for (const name of await loadEnvFile(path.resolve(baseDir, rel))) envFileVars.add(name);
 
   return { file, baseDir, version: 1, profile: profileName, providers, layers, settings };
 }
@@ -135,14 +136,38 @@ export interface CaseGroup {
 }
 
 /** Load a layer's case files (include globs + inline cases). */
-export async function loadLayerCases(layer: LayerConfig, baseDir: string): Promise<CaseGroup[]> {
+export async function loadLayerCases(
+  layer: LayerConfig,
+  baseDir: string,
+  /** settings.capture.file — exempt, since it exists only after `heyllm capture` */
+  captureRel?: string
+): Promise<CaseGroup[]> {
   const groups: CaseGroup[] = [];
   if (layer.cases) groups.push({ file: null, cases: layer.cases });
   const patterns = Array.isArray(layer.include) ? layer.include : layer.include ? [layer.include] : [];
   const files: string[] = [];
-  for (const pat of patterns) files.push(...(await glob(pat, baseDir)));
+  // Check EVERY pattern, not just the aggregate. A layer with several includes
+  // used to swallow a typo in any one of them as long as a sibling matched —
+  // coverage silently dropped to whatever was left, and the run stayed green.
+  // (Measured: a real config referenced a case file that did not exist; the
+  // layer reported PASS for months.) A single missing include already errored;
+  // this makes the list case behave the same way instead of the opposite way.
+  const unmatched: string[] = [];
+  for (const pat of patterns) {
+    const hits = await glob(pat, baseDir);
+    if (!hits.length) unmatched.push(pat);
+    files.push(...hits);
+  }
   if (patterns.length && !files.length && !layer.cases)
     err(`layer '${layer.name}': include matched no files (${patterns.join(", ")}) under ${baseDir}`);
+  // The capture target is legitimately absent until `heyllm capture` writes it.
+  const captureFile = captureRel ? path.resolve(baseDir, captureRel) : null;
+  const real = unmatched.filter((pat) => !captureFile || path.resolve(baseDir, pat) !== captureFile);
+  if (real.length)
+    err(
+      `layer '${layer.name}': include matched no files: ${real.join(", ")} (under ${baseDir}). ` +
+        `Remove the pattern or fix the path — a silently empty include hides missing coverage.`
+    );
   for (const f of [...new Set(files)]) {
     let doc: any;
     try {

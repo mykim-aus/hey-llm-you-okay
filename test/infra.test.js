@@ -1,5 +1,5 @@
 /**
- * Regressions for the "silently unverified" family of bugs (0.1.4).
+ * Regressions for the "silently unverified" family of bugs (0.1.4, 0.1.5).
  *
  * Every case here is the same shape: heyllm accepted something, could not
  * actually honour it, and reported a result anyway. The assertions are about
@@ -221,4 +221,83 @@ test("toolCalled rejects a matcher object instead of stringifying it", async () 
   const ok = [];
   checkLlmExpect({ toolCalled: "get_account" }, actual, ok);
   assert.equal(ok.length, 0);
+});
+
+// ── 0.1.5: three more ways a run could report a verdict it had not earned ────
+// All found by dogfooding on a production project, all the same shape as the
+// bugs above: heyllm accepted the instruction, silently did less than asked,
+// and printed a result that looked like coverage.
+
+test("settings.envFile keys do NOT leak into exec children", async () => {
+  const dir = await project({
+    ".env": "HEYLLM_TEST_SECRET=sk-notreal\n",
+    "heyllm.yaml": `
+settings: { envFile: .env }
+layers:
+  - name: undeclared
+    kind: exec
+    cases:
+      - name: child
+        command: 'echo "SEEN=[\${HEYLLM_TEST_SECRET:-UNSET}] PATH_OK=\${PATH:+yes}"'
+        expect: { stdout: "SEEN=[UNSET] PATH_OK=yes" }
+  - name: declared
+    kind: exec
+    env: [HEYLLM_TEST_SECRET]
+    cases:
+      - name: child
+        command: 'echo "SEEN=[\${HEYLLM_TEST_SECRET:-UNSET}]"'
+        expect: { stdout: "SEEN=[sk-notreal]" }
+`,
+  });
+  delete process.env.HEYLLM_TEST_SECRET;
+  const summary = await runSuite(await loadConfig(path.join(dir, "heyllm.yaml")));
+
+  // Before 0.1.5 the child inherited the runner's whole environment, so a
+  // wrapped Jest suite whose live tests self-skip on `if (process.env.API_KEY)`
+  // stopped skipping — every pre-deploy run quietly made paid API calls the
+  // author had gated off. Ambient vars (PATH) must still pass through, and a
+  // layer that NAMES the var still gets it.
+  assert.equal(summary.ok, true, summary.layers.flatMap((l) => l.cases).map((c) => c.name + ":" + c.ok).join(" "));
+  delete process.env.HEYLLM_TEST_SECRET;
+});
+
+test("one bad path in a multi-item include is an error, not a silent skip", async () => {
+  const dir = await project({
+    "real.yaml": "kind: exec\ncases:\n  - { name: real, command: 'true' }\n",
+    "heyllm.yaml": `
+layers:
+  - name: partial
+    kind: exec
+    include: [real.yaml, typo-not-here.yaml]
+`,
+  });
+  // A SINGLE missing include already errored; a LIST swallowed the typo as long
+  // as one sibling matched, so coverage dropped to whatever was left and the run
+  // stayed green. The two cases must behave the same way.
+  await assert.rejects(
+    () => loadConfig(path.join(dir, "heyllm.yaml")).then((cfg) => runSuite(cfg)),
+    /include matched no files: typo-not-here\.yaml/
+  );
+});
+
+test("an exec case can report 'could not measure' instead of a false failure", async () => {
+  const dir = await project({
+    "heyllm.yaml": `
+layers:
+  - name: e2e
+    kind: exec
+    cases:
+      - name: rate-limited
+        command: "echo 'HTTP 429' >&2; exit 97"
+`,
+  });
+  const summary = await runSuite(await loadConfig(path.join(dir, "heyllm.yaml")));
+
+  // A rate-limited harness reporting "0/12 passed" is indistinguishable from a
+  // real regression — the same "we never got to ask" distinction the provider
+  // path already makes, now available to wrapped harnesses via exit 97.
+  assert.equal(summary.ok, false);
+  assert.ok(summary.infra?.length, "exit 97 must be recorded as infrastructure, not a failed assertion");
+  assert.equal(summary.infra[0].case, "rate-limited");
+  assert.match(summary.infra[0].message, /could not measure/);
 });

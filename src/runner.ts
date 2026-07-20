@@ -166,7 +166,7 @@ export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Pro
       continue;
     }
 
-    const groups = await loadLayerCases(layer, config.baseDir);
+    const groups = await loadLayerCases(layer, config.baseDir, config.settings?.capture?.file);
     const saved: Record<string, unknown> = {}; // save-chaining scope: whole layer
     const flat: Array<{ def: CaseDef; file: string | null; baseDir: string }> = [];
     for (const g of groups) {
