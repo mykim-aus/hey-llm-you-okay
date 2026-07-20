@@ -4,7 +4,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, mkdir, readFile } from "node:fs/promises";
+import { mkdtemp, writeFile, mkdir, readFile, symlink } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -488,4 +488,15 @@ layers:
   assert.equal(problems.length, 1);
   assert.match(problems[0], /invalid \$pattern/);
   assert.match(problems[0], /\$flags/);
+});
+
+test("bin entry: runs when invoked through a node_modules/.bin style symlink", async () => {
+  // npm links the `heyllm` bin as a symlink to dist/cli.js, so argv[1] is the
+  // link path while import.meta.url is the real file. A basename comparison
+  // fails that match and main() silently never runs — exit 0, no output.
+  const dir = await mkdtemp(path.join(tmpdir(), "heyllm-bin-"));
+  const link = path.join(dir, "heyllm");
+  await symlink(CLI, link);
+  const out = execFileSync("node", [link, "--help"], { encoding: "utf8" });
+  assert.match(out, /commands:/, "help must print when invoked via the bin symlink");
 });

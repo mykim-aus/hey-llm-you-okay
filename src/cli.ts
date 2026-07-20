@@ -13,8 +13,10 @@
  *
  * Exit codes: 0 pass · 1 gated failure · 2 usage/config error
  */
+import { realpathSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { captureCase } from "./capture.js";
 import { ConfigError, loadConfig, loadLayerCases, validateCases } from "./config.js";
 import { printSummary } from "./report/console.js";
@@ -344,8 +346,18 @@ export async function main(argv: string[]): Promise<number> {
   }
 }
 
-// entry point when invoked as a bin
-const isMain = process.argv[1] && import.meta.url.endsWith(path.basename(process.argv[1]));
+// Entry point when invoked as a bin. argv[1] is the path the user invoked —
+// via `node dist/cli.js` that is this file, but via the `heyllm` bin it is a
+// symlink in node_modules/.bin. Compare resolved real paths so both match;
+// a basename check would silently no-op on the symlink path.
+const isMain = (() => {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+})();
 if (isMain) {
   main(process.argv.slice(2)).then(
     (code) => process.exit(code),
