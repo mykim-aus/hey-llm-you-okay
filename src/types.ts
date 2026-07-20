@@ -107,6 +107,9 @@ export interface RubricItem {
   id: string;
   question: string;
   weight?: number;
+  /** decision rules for the grey zone. Without these the judge re-invents the
+   *  policy on every call — the actual cause of the 2-vs-9 disagreement. */
+  rules?: string[];
   /** "scale" (default, min..max) or "binary" (pass/fail). Binary removes the
    *  grey zone that makes judges disagree on fuzzy surface properties. */
   ask?: "scale" | "binary";
@@ -118,10 +121,15 @@ export interface RubricItem {
 
 /** Judge trustworthiness gate. A verdict nobody can reproduce is not a verdict. */
 export interface ReliabilityConfig {
-  /** max allowed spread (max-min) across votes before the verdict is refused */
+  /** max allowed spread (max-min) before the verdict is refused. Applies to
+   *  BOTH axes: votes within a run, and scores across remembered runs. */
   maxSpread?: number;
   /** set false to score anyway and only warn */
   enforce?: boolean;
+  /** how many remembered runs before the run-axis check activates (default 3) */
+  minRuns?: number;
+  /** set false to skip the run-axis ledger entirely */
+  ledger?: boolean;
 }
 
 /** How a model response is folded into application state. */
@@ -218,11 +226,21 @@ export interface VoteResult {
   spans?: Record<string, string>;
 }
 
-/** Per-rubric-item vote agreement — the number nobody else reports. */
+/** Per-rubric-item agreement on BOTH axes — the numbers nobody else reports.
+ *  `spread` is within-run (votes); `runAxis` is across remembered runs, which
+ *  is where instability actually showed up in practice. */
 export interface AgreementReport {
   spread: number;
   perItem: Record<string, { min: number; max: number; spread: number }>;
   worstItem: string | null;
+  runAxis?: {
+    item: string;
+    spread: number;
+    runs: number;
+    min: number;
+    max: number;
+    attribution: "judge-only" | "confounded" | "insufficient";
+  } | null;
 }
 
 export interface AttemptResult {
@@ -263,6 +281,8 @@ export interface CaseResult {
   /** dispatch layer / block */
   dispatchState?: unknown;
   dispatchEffects?: unknown[];
+  /** judge — observations for this run, appended by the runner (pass OR fail) */
+  ledgerObservations?: Array<{ key: string; fp: string; obs: LedgerObservation }>;
   output?: string;
   /** exec layer failure context */
   outputTail?: string;
@@ -279,6 +299,8 @@ export interface CaseCtx {
   lookup: (name: string) => unknown;
   saved: Record<string, unknown>;
   config: HeyLLMConfig;
+  /** run-axis reliability history, loaded once per run by the runner */
+  ledger?: LedgerFile;
 }
 
 export interface CaseRunRecord {
@@ -337,6 +359,8 @@ export interface TriageReport {
   arms?: TriageArm[];
   model?: { snapshot?: string; current?: string };
 }
+
+import type { LedgerFile, LedgerObservation } from "./ledger.js";
 
 // ── baseline / snapshot store ─────────────────────────────────────
 export interface SnapshotEntry {

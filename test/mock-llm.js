@@ -72,6 +72,13 @@ export function startMockLLM() {
         if (lastUser.includes("[RUBRIC]")) {
           // UNSTABLE marker: return a wildly different score each call so the
           // reliability gate can be exercised deterministically.
+          // RUNDRIFT: votes AGREE within a run, but the level moves between
+          // runs — the real-world pattern a vote-spread gate cannot see.
+          if (lastUser.includes("RUNDRIFT")) {
+            const ids = [...lastUser.matchAll(/^- \[([a-zA-Z0-9_-]+)\]/gm)].map((m) => m[1]);
+            const level = state.rundriftLevel ?? 9;
+            return reply(JSON.stringify({ reasoning: "rundrift mock", scores: Object.fromEntries(ids.map((i) => [i, level])) }));
+          }
           if (lastUser.includes("UNSTABLE")) {
             const ids = [...lastUser.matchAll(/^- \[([a-zA-Z0-9_-]+)\]/gm)].map((m) => m[1]);
             const n = (state.counters.get("unstable") || 0) + 1;

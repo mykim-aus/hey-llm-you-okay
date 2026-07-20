@@ -27,6 +27,7 @@
  *   kind: dispatch  — replay RECORDED calls, no model, free and gated
  *   llm case + `dispatch:` block — fold the LIVE model's calls, full chain
  */
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { applyExpect, matchValue } from "../assert.js";
@@ -51,9 +52,37 @@ async function loadReducer(spec: DispatchSpec, baseDir: string): Promise<Reducer
   try {
     mod = (await import(pathToFileURL(file).href)) as Record<string, unknown>;
   } catch (e: any) {
-    throw new Error(
-      `dispatch.module could not be imported: ${file}\n  ${e.message}\n  (the reducer must be a plain ESM module — no bundler aliases, no JSX)`
-    );
+    // A `.js` file written as ESM inside a CommonJS package (no "type":
+    // "module") — extremely common in Next.js/Babel projects, where the
+    // bundler understands ESM but bare Node does not. A reducer is pure by
+    // contract, so it is safe to evaluate as a standalone module.
+    const cjsEsmClash =
+      /Unexpected token 'export'|Cannot use import statement outside a module/.test(e?.message ?? "");
+    if (cjsEsmClash) {
+      try {
+        const src = await readFile(file, "utf8");
+        if (/^\s*(import|export)\s+[^(]/m.test(src.replace(/^\s*\/\/.*$/gm, ""))) {
+          const relImport = src.match(/^\s*import[^;]*?from\s*["'](\.[^"']*)["']/m);
+          if (relImport)
+            throw new Error(
+              `dispatch.module ${file} is ESM inside a CommonJS package AND imports '${relImport[1]}'.\n` +
+                `  A reducer must be self-contained (no imports) so it can be evaluated standalone —\n` +
+                `  inline what it needs, or rename the file to .mjs.`
+            );
+        }
+        mod = (await import(
+          `data:text/javascript;base64,${Buffer.from(src, "utf8").toString("base64")}`
+        )) as Record<string, unknown>;
+      } catch (inner: any) {
+        throw new Error(
+          `dispatch.module could not be imported: ${file}\n  ${inner.message || e.message}`
+        );
+      }
+    } else {
+      throw new Error(
+        `dispatch.module could not be imported: ${file}\n  ${e.message}\n  (the reducer must be a plain ESM module — no bundler aliases, no JSX)`
+      );
+    }
   }
   const name = spec.export ?? "default";
   const fn = mod[name] ?? (mod as any).default;

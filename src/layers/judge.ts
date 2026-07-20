@@ -8,13 +8,20 @@
  * consistently with the context?") cut the spread from 8 to 3, and two votes
  * on one output became identical.
  *
- * So this layer does three things no score-only judge does:
- *   1. `ask: binary` + `citeSpan` — remove the grey zone, and verify the quoted
- *      evidence actually exists in the output (fabricated evidence is dropped).
- *   2. Measure per-item vote agreement and report it.
- *   3. When the judges disagree beyond `reliability.maxSpread`, refuse to
- *      return a verdict at all — INCONCLUSIVE. Saying "I cannot tell" is
- *      better than a coin-flip pass.
+ * CRUCIALLY, those six scores were (9,8) (2,3) (10,9) — agreement WITHIN each
+ * run was perfect. A vote-spread gate calls all three "stable" and the middle
+ * run's tight agreement stamps confidence on a verdict 6 points off. The
+ * instability is on the TIME axis; more votes cannot see it. So this layer
+ * measures both axes:
+ *   1. `ask: binary` + `citeSpan` + `rules:` — remove the grey zone, verify the
+ *      quoted evidence exists, and pin the decision policy so the judge does
+ *      not re-invent it every call.
+ *   2. Vote agreement within a run, AND score spread across remembered runs
+ *      (src/ledger.ts) — with attribution: identical output hash + diverging
+ *      scores means the JUDGE moved; differing hashes mean the subject moved
+ *      too and the spread is confounded.
+ *   3. Beyond `reliability.maxSpread` on either axis, refuse to return a
+ *      verdict — INCONCLUSIVE. "I cannot tell" beats a coin-flip pass.
  *
  * Subject and judge are independent providers: produce with a paid API in CD,
  * judge with a local CLI on your machine — or the reverse.
@@ -35,6 +42,7 @@ import type {
   VoteResult,
 } from "../types.js";
 import { extractJson, interpolateDeep, resolveRef, truncate } from "../util.js";
+import { itemFingerprint, itemKey, runAxisSpread, shortHash } from "../ledger.js";
 import { produceLlm, resolveLlmInputs } from "./llm.js";
 
 type FullRubric = RubricItem & { weight: number; ask: "scale" | "binary" };
@@ -63,8 +71,11 @@ export function buildJudgePrompt({
   const cited = rubric.filter((r) => r.citeSpan);
 
   const lines: string[] = [];
-  for (const r of rubric)
+  for (const r of rubric) {
     lines.push(`- [${r.id}] (${r.ask === "binary" ? "yes/no" : `${scale.min}-${scale.max}`}) ${r.question}`);
+    // 4-space indent, never "- [" — mock/parsers scrape rubric ids by that prefix
+    for (const rule of r.rules || []) lines.push(`    · ${rule}`);
+  }
 
   const rules = [
     `- Judge ONLY what is present in the response. Never reward length, politeness or effort.`,
@@ -82,12 +93,15 @@ export function buildJudgePrompt({
     `- Output ONLY one JSON object. No markdown, no code fences, no commentary.`,
   ].filter(Boolean);
 
+  // Key order is deliberate: reasoning and evidence FIRST, scores LAST. An
+  // autoregressive judge that emits the number first spends the rest of the
+  // object justifying it — observed as "acknowledges the violation, scores 9".
   const shape = [
+    `"reasoning": "<max 3 sentences>"`,
+    cited.length ? `"spans": {${cited.map((r) => `"${r.id}": "<exact quote>"`).join(", ")}}` : "",
     `"scores": {${rubric
       .map((r) => `"${r.id}": ${r.ask === "binary" ? "true|false" : `<int ${scale.min}-${scale.max}>`}`)
       .join(", ")}}`,
-    cited.length ? `"spans": {${cited.map((r) => `"${r.id}": "<exact quote>"`).join(", ")}}` : "",
-    `"reasoning": "<max 3 sentences>"`,
   ].filter(Boolean);
 
   return `You are an impartial evaluator of LLM outputs.
@@ -287,29 +301,86 @@ export async function runJudgeCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResul
     return { ok: false, failures };
   }
 
-  const score = median(voteResults.map((v) => v.weighted));
+  // Aggregate PER ITEM, not per vote: a single item swinging 2↔10 must not be
+  // laundered into one diluted total that hides which item is the culprit.
+  const score = round2(
+    rubric.reduce((s, r) => s + median(voteResults.map((v) => v.scores[r.id])) * r.weight, 0) / wSum
+  );
   const agreement = computeAgreement(voteResults, rubric);
-  const base = { score, scale, votes: voteResults, agreement, output: truncate(subject.output, 600), resolvedInputs: subject.resolvedInputs };
+
+  // ── run axis ─────────────────────────────────────────────────────
+  // Consult the ledger the runner loaded, and hand back this run's
+  // observations so the runner can append them (pass or fail).
+  const outHash = shortHash(subject.output);
+  const judgeModel = judgeProvider.model ?? "";
+  const observations = rubric.map((r) => ({
+    key: itemKey(ctx.layer.name, cs.name, r.id),
+    fp: itemFingerprint({ question: r.question, rules: r.rules, ask: r.ask, judgeModel }),
+    obs: {
+      at: new Date().toISOString(),
+      scores: voteResults.map((v) => v.scores[r.id]),
+      out: outHash,
+      ...(voteResults[0]?.spans?.[r.id] ? { span: voteResults[0].spans[r.id] } : {}),
+    },
+  }));
+  let runAxis: AgreementReport["runAxis"] = null;
+  if (reliability.ledger !== false && ctx.ledger) {
+    for (const o of observations) {
+      const prev = ctx.ledger.items[o.key];
+      const rep = runAxisSpread(
+        prev && prev.fp === o.fp ? { fp: o.fp, runs: [...prev.runs, o.obs] } : { fp: o.fp, runs: [o.obs] },
+        reliability.minRuns ?? 3
+      );
+      if (rep && (!runAxis || rep.spread > runAxis.spread)) runAxis = { item: o.key, ...rep };
+    }
+  }
+  agreement.runAxis = runAxis;
+  const base = {
+    score,
+    scale,
+    votes: voteResults,
+    agreement,
+    output: truncate(subject.output, 600),
+    resolvedInputs: subject.resolvedInputs,
+    ledgerObservations: observations,
+  };
 
   // ── the trust gate ───────────────────────────────────────────────
   // If the judges cannot reproduce each other, the score is noise. Refuse to
   // return a verdict rather than flip a coin. A gated layer fails closed.
-  if (
-    reliability.enforce !== false &&
-    voteResults.length > 1 &&
-    reliability.maxSpread !== undefined &&
-    agreement.spread > reliability.maxSpread
-  ) {
-    const worst = agreement.worstItem;
-    const detail = worst ? ` worst item '${worst}' ranged ${agreement.perItem[worst].min}–${agreement.perItem[worst].max}.` : "";
-    return {
-      ...base,
-      ok: !ctx.layer.gate, // gated layer fails closed; otherwise report loudly
-      inconclusive:
-        `judges disagreed by ${agreement.spread} (> maxSpread ${reliability.maxSpread}) across ${voteResults.length} votes.${detail} ` +
-        `The score is not trustworthy, so no verdict was issued — tighten the rubric (ask: binary, citeSpan) or raise votes.`,
-      failures,
-    };
+  const max = reliability.maxSpread;
+  if (reliability.enforce !== false && max !== undefined) {
+    // (a) votes within this run disagree
+    if (voteResults.length > 1 && agreement.spread > max) {
+      const worst = agreement.worstItem;
+      const detail = worst
+        ? ` Worst item '${worst}' ranged ${agreement.perItem[worst].min}–${agreement.perItem[worst].max}.`
+        : "";
+      return {
+        ...base,
+        ok: !ctx.layer.gate, // gated layer fails closed
+        inconclusive:
+          `judges disagreed by ${agreement.spread} (> maxSpread ${max}) within this run.${detail} ` +
+          `The score is not trustworthy, so no verdict was issued — tighten the rubric (ask: binary, citeSpan, rules) or raise votes.`,
+        failures,
+      };
+    }
+    // (b) this run agrees with itself, but disagrees with previous runs —
+    //     the failure mode a vote-spread gate is blind to
+    if (runAxis && runAxis.spread > max) {
+      const why =
+        runAxis.attribution === "judge-only"
+          ? `The judged output was byte-identical every time, so the JUDGE moved, not the subject — this is a missing decision rule, and more votes will not fix it. Add \`rules:\` to that item.`
+          : `The subject output also changed between runs, so this spread is confounded — freeze the output (judge a recorded \`output:\`) to attribute it.`;
+      return {
+        ...base,
+        ok: !ctx.layer.gate,
+        inconclusive:
+          `'${runAxis.item}' scored ${runAxis.min}–${runAxis.max} across ${runAxis.runs} runs (spread ${runAxis.spread} > maxSpread ${max}), ` +
+          `while agreeing with itself inside each run. ${why}`,
+        failures,
+      };
+    }
   }
 
   const threshold = cs.threshold ?? ctx.layer.threshold;

@@ -35,7 +35,7 @@ $ heyllm triage
 
 **3. The chain does not end at the model.** Every other LLM testing tool stops at *"did the model say the right thing"*. Real bugs live one step later: the model calls the right tool and the UI still doesn't change. A `dispatch` block folds the model's calls through **your** reducer and asserts the state a user would actually have seen — so "model was right, app did nothing" fails loudly instead of passing.
 
-**4. It tells you when the judge cannot be trusted.** Measured on a real case: asking a judge about a fuzzy surface property scored **2, 3, 8, 9, 9 and 10 for the same rubric item** — a `threshold: 7` gate on that is a coin flip. heyllm measures vote agreement, and when the judges disagree beyond `maxSpread` it returns **INCONCLUSIVE** instead of a verdict. Saying "I cannot tell" beats a random pass.
+**4. It tells you when the judge cannot be trusted — on the axis where it actually breaks.** Measured on a real case: the same rubric item scored **(9,8) then (2,3) then (10,9)** across three runs. Agreement *within* each run was perfect, so a vote-spread check calls all three "stable" — and the middle run's tight agreement stamps confidence on a verdict 6 points off. The instability is on the **time** axis, and more votes cannot see it. heyllm keeps a run-axis ledger (`.heyllm/ledger.json`, written on pass **and** fail) and returns **INCONCLUSIVE** when scores swing across runs — with attribution: an identical output hash means the *judge* moved, so the fix is a decision rule, not more samples.
 
 **5. The Self-Growing Corpus Ledger.** Every production complaint becomes a permanent regression test with one command:
 
@@ -262,19 +262,36 @@ rubric:
 
 `citeSpan` quotes are checked against the real output, so a fabricated citation is marked `⚠ not found in output` instead of silently scoring.
 
+When a judge keeps disagreeing about the same grey zone, the missing piece is usually a **decision rule**, not more votes — the policy is nowhere in the rubric, so the judge re-invents it every call:
+
+```yaml
+rubric:
+  - id: honors-constraint
+    ask: binary
+    citeSpan: true
+    question: "Did the response avoid supplying the English answer?"
+    rules:
+      - "A word used to explain the pattern is NOT a violation."
+      - "A word that IS the answer for the scene just given IS a violation."
+```
+
 ```yaml
 reliability:
-  maxSpread: 3      # default: 35% of the scale
-  enforce: true     # false = score anyway, still report the spread
+  maxSpread: 3      # default: 35% of the scale — applies to BOTH axes
+  minRuns: 3        # runs remembered before the time-axis check activates
+  enforce: true     # false = score anyway, still report both spreads
+  ledger: true      # false = skip the run-axis history entirely
 ```
 
-When votes disagree beyond `maxSpread`, the case is **INCONCLUSIVE**: a non-gated layer reports it loudly, a **gated layer fails closed** — you asked for a gate and no trustworthy verdict exists.
+Beyond `maxSpread` on **either** axis the case is **INCONCLUSIVE**: a non-gated layer reports it loudly, a **gated layer fails closed** — you asked for a gate and no trustworthy verdict exists. The judge prompt also emits `reasoning` and `spans` *before* `scores`, so the model cannot pick a number and then rationalise it.
 
 ```
-? situation-practice-quality INCONCLUSIVE (votes spread 8, worst: no-english-leak)
-    ↳ judges disagreed by 8 (> maxSpread 3) across 4 votes. worst item
-      'no-english-leak' ranged 2–10. The score is not trustworthy, so no
-      verdict was issued — tighten the rubric (ask: binary, citeSpan) or raise votes.
+? situation-practice-quality INCONCLUSIVE (votes spread 0)
+    ↳ 'quality/situation-practice#honors-constraints' scored 2–10 across 3 runs
+      (spread 8 > maxSpread 3), while agreeing with itself inside each run.
+      The judged output was byte-identical every time, so the JUDGE moved, not
+      the subject — this is a missing decision rule, and more votes will not
+      fix it. Add `rules:` to that item.
 ```
 
 Also accepts `output:` (judge a pre-recorded text) or `transcript:` (judge the last assistant message of a recorded conversation) — so you can grade **production logs** without calling the subject model. Rubric weights are aggregation-side only; the judge never sees them (avoids anchoring bias).

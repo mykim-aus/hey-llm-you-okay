@@ -26,6 +26,7 @@ import {
   saveBaseline,
 } from "./baseline.js";
 import { triageFailures } from "./triage.js";
+import { loadLedger, recordObservation, saveLedger } from "./ledger.js";
 import type {
   CaseCtx,
   CaseDef,
@@ -79,6 +80,11 @@ export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Pro
   const layerResults: LayerRunResult[] = [];
   const halted: string[] = [];
   const baseline = await loadBaseline(config.baseDir);
+  // The reliability ledger is written on EVERY run, pass or fail — a history
+  // that only remembers successes ratchets to the top of the distribution and
+  // then flags ordinary runs as regressions.
+  const ledger = await loadLedger(config.baseDir);
+  let ledgerDirty = false;
   const maxDrop = config.settings.maxDrop ?? 1;
   let gateBroken = false;
 
@@ -95,6 +101,7 @@ export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Pro
       saved,
       lookup: makeLookup(envScope, layer.vars, saved),
       config,
+      ledger,
     };
   };
 
@@ -151,8 +158,20 @@ export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Pro
         } catch (e: any) {
           result = { ok: false, failures: [{ path: "runner", message: e.message }] };
         }
-        // judge baseline regression (runner owns the baseline file)
-        if (layer.kind === "judge" && result.score !== undefined && layer.baseline !== false) {
+        // record run-axis observations regardless of pass/fail (see above)
+        for (const o of result.ledgerObservations || []) {
+          recordObservation(ledger, o.key, o.fp, o.obs);
+          ledgerDirty = true;
+        }
+        // judge baseline regression (runner owns the baseline file).
+        // Skipped when the verdict is INCONCLUSIVE — we do not compare against
+        // a number we just said we cannot trust.
+        if (
+          layer.kind === "judge" &&
+          result.score !== undefined &&
+          !result.inconclusive &&
+          layer.baseline !== false
+        ) {
           const key = caseKey(layer.name, def.name);
           const drop = layer.maxDrop ?? maxDrop;
           const reg = checkRegression(baseline, key, result.score, drop);
@@ -209,6 +228,7 @@ export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Pro
     if (!ok && layer.gate) gateBroken = true;
   }
 
+  if (ledgerDirty) await saveLedger(config.baseDir, ledger);
   if (opts.updateBaseline) {
     const file = await saveBaseline(config.baseDir, baseline);
     log(`baseline updated: ${file}`);
