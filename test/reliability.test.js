@@ -269,3 +269,51 @@ test("`rules:` are rendered into the judge prompt without breaking rubric parsin
   // reasoning/spans must precede scores so the judge cannot rationalise a number
   assert.ok(p.indexOf('"reasoning"') < p.indexOf('"scores"'), "scores must come last");
 });
+
+// ── heyllm doctor: the ledger needs a reader, or it is just a file ──────
+test("doctor reports stable vs unstable items and exits non-zero on unstable", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const CLI2 = path.join(path.dirname(new URL(import.meta.url).pathname), "../dist/cli.js");
+  const dir = await scaffold(RUNDRIFT_YAML);
+
+  // no history yet → says so, exits 0
+  const empty = execFileSync("node", [CLI2, "doctor"], { cwd: dir, encoding: "utf8" });
+  assert.match(empty, /no history yet/);
+
+  for (const level of [9, 2, 10]) {
+    mock.state.rundriftLevel = level;
+    await run(dir);
+  }
+  delete mock.state.rundriftLevel;
+
+  let out = "";
+  let code = 0;
+  try {
+    out = execFileSync("node", [CLI2, "doctor"], { cwd: dir, encoding: "utf8" });
+  } catch (e) {
+    code = e.status;
+    out = String(e.stdout);
+  }
+  assert.equal(code, 1, "an unreliable item must fail the check");
+  assert.match(out, /UNSTABLE .*RUNDRIFT/);
+  assert.match(out, /2–10 over 3 run\(s\), spread 8/);
+  assert.match(out, /the judge moved, not the subject|SAME evidence/);
+  // and a wide threshold makes the same data acceptable
+  const tolerant = execFileSync("node", [CLI2, "doctor", "--max-spread", "9"], { cwd: dir, encoding: "utf8" });
+  assert.match(tolerant, /all items are reproducible/);
+});
+
+test("attribution union has no member the code cannot produce", async () => {
+  const src = (await import("node:fs")).readFileSync(
+    path.join(path.dirname(new URL(import.meta.url).pathname), "../src/ledger.ts"),
+    "utf8"
+  );
+  const union = src.match(/export type RunAxisAttribution = ([^;]+);/)[1];
+  for (const member of union.split("|").map((m) => m.trim().replace(/"/g, ""))) {
+    assert.match(src, new RegExp(`"${member}"`, "g"), `${member} must be returnable`);
+    assert.ok(
+      new RegExp(`attribution:[\\s\\S]{0,80}"${member}"`).test(src),
+      `${member} is declared but never assigned — a lie in the type`
+    );
+  }
+});

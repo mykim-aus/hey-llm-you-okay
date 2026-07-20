@@ -239,7 +239,7 @@ export interface AgreementReport {
     runs: number;
     min: number;
     max: number;
-    attribution: "judge-only" | "confounded" | "insufficient";
+    attribution: "judge-only" | "confounded";
   } | null;
 }
 

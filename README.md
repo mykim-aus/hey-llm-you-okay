@@ -358,7 +358,25 @@ heyllm triage                  # red? find out WHO broke it
 heyllm run --update-baseline   # green? freeze the new prompt as the snapshot
 ```
 
-Commit `.heyllm/baseline.json` with the prompt change — the snapshot and the prompt travel together through code review.
+Commit `.heyllm/baseline.json` with the prompt change — the snapshot and the prompt travel together through code review. Do **not** commit `.heyllm/ledger.json`: it is a per-run observation log that would conflict on every branch (`heyllm init` gitignores it for you).
+
+## Is the judge worth listening to?
+
+`heyllm doctor` reads that ledger and answers, with **zero model calls**:
+
+```
+◆ judge reliability — 3 rubric item(s)
+
+stable   quality/refund-answer#cites-source      8–9 over 6 run(s), spread 1
+UNSTABLE quality/refund-answer#no-invented-policy  2–10 over 6 run(s), spread 8
+    ↳ the judges quoted the SAME evidence from the SAME output and still scored it differently.
+      This is a missing decision rule, not sampling noise — more votes will not help. Add `rules:` to this item.
+
+1 item(s) cannot currently gate a build.
+```
+
+Exit code is non-zero when any item is unreliable, so it can run in CI as a cheap
+guard on your rubric quality.
 
 ## Local LLM ↔ CD API keys
 

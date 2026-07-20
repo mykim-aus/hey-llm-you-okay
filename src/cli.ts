@@ -18,6 +18,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { captureCase } from "./capture.js";
+import { loadLedger, runAxisSpread, sameEvidenceDifferentScore } from "./ledger.js";
 import { ConfigError, loadConfig, loadLayerCases, validateCases } from "./config.js";
 import { printSummary } from "./report/console.js";
 import { writeJsonReport } from "./report/json.js";
@@ -60,6 +61,7 @@ const VALUE_FLAGS = new Set([
   "name",
   "note",
   "layer",
+  "max-spread",
 ]);
 
 class UsageError extends Error {}
@@ -154,6 +156,58 @@ async function cmdValidate(argv: Argv): Promise<number> {
   }
   console.log(c.green(`\nOK — ${config.layers.length} layers, ${total} cases, providers: ${Object.keys(config.providers).join(", ") || "(none)"}`));
   return 0;
+}
+
+/**
+ * `heyllm doctor` — read the run-axis ledger and say which rubric items cannot
+ * be trusted. Zero model calls: it only interprets observations already made.
+ */
+async function cmdDoctor(argv: Argv): Promise<number> {
+  const config = await loadConfig(argv.flags.config as string, { profile: argv.flags.profile as string });
+  const ledger = await loadLedger(config.baseDir);
+  const keys = Object.keys(ledger.items);
+  if (!keys.length) {
+    console.log(
+      `${c.yellow("no history yet")} — run the judge layer a few times, then \`heyllm doctor\` can tell you which items are stable.`
+    );
+    return 0;
+  }
+  const maxSpread = Number(argv.flags["max-spread"] ?? 3);
+  const unstableEvidence = new Set(sameEvidenceDifferentScore(ledger));
+  let unstable = 0;
+
+  console.log(c.bold(`◆ judge reliability — ${keys.length} rubric item(s)\n`));
+  for (const key of keys.sort()) {
+    const item = ledger.items[key];
+    const rep = runAxisSpread(item, 1);
+    if (!rep) continue;
+    const bad = rep.spread > maxSpread;
+    if (bad) unstable++;
+    const head = `${bad ? c.red("UNSTABLE") : c.green("stable  ")} ${key}`;
+    console.log(`${head} ${c.dim(`${rep.min}–${rep.max} over ${rep.runs} run(s), spread ${rep.spread}`)}`);
+    if (!bad) continue;
+    if (unstableEvidence.has(key)) {
+      console.log(
+        `    ${c.yellow("↳")} the judges quoted the SAME evidence from the SAME output and still scored it differently.`
+      );
+      console.log(
+        `      ${c.dim("This is a missing decision rule, not sampling noise — more votes will not help. Add `rules:` to this item.")}`
+      );
+    } else if (rep.attribution === "judge-only") {
+      console.log(`    ${c.yellow("↳")} the judged output was identical across runs, so the judge moved, not the subject.`);
+      console.log(`      ${c.dim("Tighten the item: ask: binary, citeSpan: true, and rules: for the grey zone.")}`);
+    } else {
+      console.log(`    ${c.yellow("↳")} the subject output also changed between runs — this spread is confounded.`);
+      console.log(`      ${c.dim("Judge a recorded `output:` instead of a live `input:` to attribute it.")}`);
+    }
+  }
+  console.log("");
+  console.log(
+    unstable
+      ? `${c.red(`${unstable} item(s) cannot currently gate a build.`)} Fix the rubric, or raise reliability.maxSpread deliberately.`
+      : c.green("all items are reproducible enough to gate on.")
+  );
+  return unstable ? 1 : 0;
 }
 
 async function cmdCapture(argv: Argv): Promise<number> {
@@ -274,6 +328,10 @@ const INIT_PROMPT = `You are a helpful, safe assistant. Refuse harmful requests 
 
 async function cmdInit(): Promise<number> {
   const writes: Array<[string, string]> = [
+    // baseline.json is a reviewed artifact and travels with the prompt change.
+    // ledger.json is a per-run observation log — committing it conflicts on
+    // every branch and tells reviewers nothing.
+    [".heyllm/.gitignore", "ledger.json\n"],
     ["heyllm.yaml", INIT_CONFIG],
     ["tests/static/sanity.yaml", INIT_STATIC],
     ["tests/behavior/basics.yaml", INIT_BEHAVIOR],
@@ -301,6 +359,7 @@ commands:
   run        run the layer pyramid (cheap → expensive, gated halt)
   triage     run, then A/B-probe every AI failure (flaky | your-change | model-drift)
   validate   lint config + case files without executing
+  doctor     read the run-axis ledger: which rubric items can be trusted (no model calls)
   capture    append a real-world input to the golden corpus ledger
   init       scaffold heyllm.yaml + example tests
 
@@ -341,6 +400,8 @@ export async function main(argv: string[]): Promise<number> {
         return await cmdValidate(parsed);
       case "capture":
         return await cmdCapture(parsed);
+      case "doctor":
+        return await cmdDoctor(parsed);
       case "init":
         return await cmdInit();
       case "version":

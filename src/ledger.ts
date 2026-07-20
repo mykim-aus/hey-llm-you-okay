@@ -9,13 +9,17 @@
  *   The instability lived on the TIME axis, not the vote axis. Measuring more
  *   votes cannot see it; only remembering previous runs can.
  *
+ * COMMIT POLICY: `.heyllm/baseline.json` is a reviewed artifact and belongs in
+ * git. This ledger is NOT — it changes on every run and would conflict on every
+ * branch. `heyllm init` scaffolds `.heyllm/.gitignore` accordingly.
+ *
  * Two properties make this cheap:
  *   - zero extra model calls: it records what a run already produced
  *   - written on every run, pass OR fail — a ledger that only remembers
  *     successes ratchets to the top of the distribution and lies
  *
  * ATTRIBUTION: each observation stores a hash of the subject output that was
- * judged. If scores диverge while the output hash is identical, the judge is
+ * judged. If scores diverge while the output hash is identical, the judge is
  * the unstable part. If the hashes differ, the subject model also moved and
  * the spread is confounded — the tool says which, instead of guessing.
  */
@@ -96,7 +100,8 @@ export function recordObservation(
   ledger.items[key] = item;
 }
 
-export type RunAxisAttribution = "judge-only" | "confounded" | "insufficient";
+/** Why the scores moved. Only computable when there is history to compare. */
+export type RunAxisAttribution = "judge-only" | "confounded";
 
 export interface RunAxisReport {
   /** spread across ALL votes of ALL remembered runs */
