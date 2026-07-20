@@ -1,0 +1,20 @@
+kind: http
+cases:
+  - name: health
+    request: { url: "http://127.0.0.1:4141/api/health" }
+    expect: { status: 200, json: { ok: true } }
+
+  - name: wrong-password-401
+    request:
+      method: POST
+      url: "http://127.0.0.1:4141/api/login"
+      json: { user: demo, pass: wrong }
+    expect: { status: 401, json: { error: login_required } }
+
+  - name: login-and-save-token
+    request:
+      method: POST
+      url: "http://127.0.0.1:4141/api/login"
+      json: { user: demo, pass: haechi }
+    expect: { status: 200, jsonPath: { token: { $exists: true } } }
+    save: { token: json.token }

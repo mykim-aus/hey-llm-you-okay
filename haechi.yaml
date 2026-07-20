@@ -1,0 +1,28 @@
+# Dogfood — haechi tests haechi with itself.
+version: 1
+
+providers: {}   # static/exec only: no models needed
+
+layers:
+  - name: hygiene
+    kind: static
+    cases:
+      - name: no-merge-markers
+        files: ["src/**", "test/**"]
+        forbid: ["^<<<<<<< ", "^>>>>>>> "]
+      - name: package-json-valid
+        file: package.json
+        jsonValid: true
+      - name: no-debugger
+        files: ["src/**"]
+        forbid: [{ pattern: "^\\s*debugger", message: "leftover debugger statement" }]
+      - name: secrets-never-in-yaml-rule-still-documented
+        file: src/config.ts
+        require: [{ pattern: "never put raw keys in YAML" }]
+
+  - name: unit
+    kind: exec
+    cases:
+      - name: self-tests
+        command: "node --test test/*.test.js"
+        timeoutMs: 120000

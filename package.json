@@ -1,0 +1,56 @@
+{
+  "name": "haechi",
+  "version": "0.1.0",
+  "description": "해치(獬豸) — a unified, pyramid-ordered LLM testing CLI for CI/CD. YAML-defined layers (static → exec → http → llm → judge), LLM-as-a-judge gates, and an automated failure-triage protocol (A/B probe) that tells you whether a red test is your prompt's fault or model drift.",
+  "type": "module",
+  "bin": {
+    "haechi": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18.18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepare": "npm run build",
+    "test": "npm run build && node --test test/*.test.js",
+    "demo": "npm run build && node examples/quickstart/run-demo.js",
+    "selfcheck": "npm run build && node dist/cli.js run"
+  },
+  "keywords": [
+    "llm",
+    "eval",
+    "llm-as-a-judge",
+    "testing",
+    "ci",
+    "cd",
+    "yaml",
+    "prompt-regression",
+    "triage",
+    "model-drift",
+    "gemini",
+    "anthropic",
+    "openai",
+    "ollama"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "yaml": "^2.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "typescript": "^5.5.0"
+  }
+}

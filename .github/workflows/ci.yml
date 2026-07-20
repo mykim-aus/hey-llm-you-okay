@@ -1,0 +1,21 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [18, 20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci
+      - run: npm test                      # build + self-tests (27 assertions, offline)
+      - run: node examples/quickstart/run-demo.js   # full offline e2e incl. triage
+      - run: node dist/cli.js run          # dogfood: haechi tests haechi

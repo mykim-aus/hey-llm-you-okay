@@ -1,0 +1,51 @@
+# Quickstart — the full pyramid against the offline demo server (no API keys).
+# Swap providers for real ones (gemini/anthropic/openai/ollama) in your project.
+version: 1
+
+providers:
+  subject:
+    kind: openai-compatible
+    baseUrl: http://127.0.0.1:4141/v1
+    model: demo-chatbot
+  judge:
+    kind: openai-compatible
+    baseUrl: http://127.0.0.1:4141/v1
+    model: demo-judge
+
+settings:
+  triage: { repeat: 3 }
+  capture: { file: tests/captured.yaml }
+
+layers:
+  # 1층 — 정적 검사: 프롬프트 파일 오타/필수 섹션 (ms, 무료)
+  - name: static
+    kind: static
+    include: tests/static.yaml
+
+  # 2층 — HTTP 통합: 앱 API의 인증/오류 경로 (결정적)
+  - name: api
+    kind: http
+    include: tests/http.yaml
+
+  # 3층 — LLM 행동: 툴 호출·대화 흐름·문구를 결정적으로 단언
+  # (데모 서버는 결정적이라 gate 가능 — 실모델에선 repeat/passRate와 함께 신중히)
+  - name: behavior
+    kind: llm
+    provider: subject
+    gate: true
+    include:
+      - tests/functional.yaml
+      - tests/conversation.yaml
+      - tests/captured.yaml
+    repeat: 1
+
+  # 4층 — LLM 심판: 신뢰성/보안은 루브릭으로 채점 (가장 비싼 층, 마지막)
+  - name: quality
+    kind: judge
+    subject: subject
+    judge: judge
+    include:
+      - tests/reliability.yaml
+      - tests/security.yaml
+    votes: 3
+    threshold: 7

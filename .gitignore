@@ -1,0 +1,8 @@
+node_modules/
+dist/
+haechi-report.json
+haechi-report.xml
+examples/quickstart/.haechi/
+examples/quickstart/tests/captured.yaml
+*.log
+.DS_Store

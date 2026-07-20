@@ -1,0 +1,12 @@
+kind: static
+cases:
+  - name: prompt-exists-and-clean
+    file: ../prompts/chatbot.txt
+    mustExist: true
+    forbid: ["^<<<<<<< ", "TODO-REMOVE"]
+    require:
+      - { pattern: "SAFETY", message: "safety section must stay in the system prompt" }
+
+  - name: config-is-valid-yaml
+    file: ../haechi.yaml
+    yamlValid: true
