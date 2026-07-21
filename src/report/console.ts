@@ -86,7 +86,13 @@ export function printTriage(reports: TriageReport[]): void {
   console.log("");
   console.log(c.bold("◆ TRIAGE — AI failure adjudication (A/B probe)"));
   for (const t of reports) {
-    console.log(`  ${VERDICT_LABEL[t.verdict]} ${c.bold(`${t.layer}/${t.caseName}`)}`);
+    // A low-confidence attribution is flagged next to the verdict — the tool
+    // must not present an n=3 guess with the same authority as a clean call.
+    const confTag =
+      t.confidence && t.confidence !== "high"
+        ? (t.confidence === "low" ? c.yellow : c.dim)(` (confidence: ${t.confidence})`)
+        : "";
+    console.log(`  ${VERDICT_LABEL[t.verdict]} ${c.bold(`${t.layer}/${t.caseName}`)}${confTag}`);
     console.log(`      ${t.reason}`);
     for (const arm of t.arms || [])
       console.log(

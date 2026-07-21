@@ -31,7 +31,13 @@ export function createProviders(providerConfigs: Record<string, ProviderConfig>)
     out[name] = {
       name,
       kind: cfg.kind,
-      model: cfg.model ?? cfg.command,
+      // A command provider spawns `command:` and ignores `model:` entirely, so
+      // its honest identity is the command. Preferring `cfg.model` here mislabels
+      // it whenever a stale model survives a profile merge — e.g. a base
+      // `{kind: gemini, model: gemini-2.5-flash}` overridden to `{kind: command,
+      // command: claude}` keeps the gemini model and the token report then calls
+      // the Claude judge "gemini-2.5-flash".
+      model: cfg.kind === "command" ? cfg.command : cfg.model,
       ...make(resolved, name),
     };
   }

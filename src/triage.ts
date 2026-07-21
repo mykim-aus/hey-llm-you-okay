@@ -37,6 +37,7 @@ import type {
   Provider,
   ResolvedLlmInputs,
   TriageArm,
+  TriageConfidence,
   TriageReport,
 } from "./types.js";
 import { extractJson } from "./util.js";
@@ -164,7 +165,31 @@ async function runArm(
 
 const rate = (arm: TriageArm) => arm.passed / arm.attempts;
 
-function verdictOf(current: TriageArm, snapshot: TriageArm | null): { verdict: TriageReport["verdict"]; reason: string } {
+/**
+ * How much to trust an A/B attribution. The threshold logic (rate ≤ 1/3) can
+ * fire at n=3 where 3/3 failures are ~22% likely by chance for a case whose
+ * true pass rate is 40% — indistinguishable from real drift. So a verdict is
+ * only "high" when BOTH arms are UNANIMOUS and there were enough samples;
+ * "low" whenever an arm was split (a 1/3 that squeaked under the threshold) or
+ * the sample is small. A low-confidence attribution says so and asks for more
+ * samples rather than declaring a cause it cannot support.
+ */
+function confidenceOf(current: TriageArm, snapshot: TriageArm): TriageConfidence {
+  const n = Math.min(current.attempts, snapshot.attempts);
+  const unanimous = (a: TriageArm) => a.passed === 0 || a.passed === a.attempts;
+  if (!unanimous(current) || !unanimous(snapshot)) return "low"; // a split arm barely crossed the line
+  if (n >= 5) return "high";
+  if (n >= 3) return "medium";
+  return "low";
+}
+
+const bump = (conf: TriageConfidence) =>
+  conf === "high" ? "" : ` [confidence: ${conf}${conf === "low" ? " — raise settings.triage.repeat before acting" : ""}]`;
+
+function verdictOf(
+  current: TriageArm,
+  snapshot: TriageArm | null
+): { verdict: TriageReport["verdict"]; reason: string; confidence?: TriageConfidence } {
   const HIGH = 2 / 3;
   const LOW = 1 / 3;
   if (rate(current) >= HIGH)
@@ -177,15 +202,23 @@ function verdictOf(current: TriageArm, snapshot: TriageArm | null): { verdict: T
       verdict: "no-snapshot",
       reason: "no last-passing snapshot or git history for the old arm — run once green (or commit prompts) to enable A/B triage",
     };
+  const conf = confidenceOf(current, snapshot);
   if (rate(current) <= LOW && rate(snapshot) >= HIGH)
     return {
       verdict: "your-change",
-      reason: `old inputs still pass ${snapshot.passed}/${snapshot.attempts} under today's model while current fail ${current.attempts - current.passed}/${current.attempts} — the diff between them broke it`,
+      confidence: conf,
+      reason: `old inputs still pass ${snapshot.passed}/${snapshot.attempts} under today's model while current fail ${current.attempts - current.passed}/${current.attempts} — the diff between them broke it${bump(conf)}`,
     };
   if (rate(current) <= LOW && rate(snapshot) <= LOW)
     return {
       verdict: "model-drift",
-      reason: `BOTH current and last-passing inputs now fail (${current.passed}/${current.attempts} vs ${snapshot.passed}/${snapshot.attempts}) — the provider's model behavior changed; re-baseline or adapt`,
+      confidence: conf,
+      // The retrieval caveat: byte-identical inputs rule out YOUR-CHANGE and any
+      // retrieval that lives INSIDE the resolved prompt. Retrieval fetched by the
+      // app OUTSIDE the captured inputs can still masquerade as drift.
+      reason: `BOTH current and last-passing inputs now fail (${current.passed}/${current.attempts} vs ${snapshot.passed}/${snapshot.attempts}) — the provider's model behavior changed; re-baseline or adapt${bump(conf)}${
+        conf === "low" ? "" : " (if context is retrieved outside the captured prompt, confirm the resolved inputs include it)"
+      }`,
     };
   return {
     verdict: "inconclusive",
@@ -257,11 +290,21 @@ export async function triageFailures(
     // diff shortcut — inputs IDENTICAL to the last-passing snapshot mean the
     // failure cannot be "your change"; skip the B arm entirely (zero extra cost)
     if (snap && JSON.stringify(snap.inputs) === JSON.stringify(currentInputs)) {
+      // Strongest drift signal (inputs literally identical → cannot be your
+      // change), but the current arm can still be a noisy 1/3 rather than a
+      // clean 0/3. Confidence tracks the current arm's unanimity and sample size.
+      // Same floor as confidenceOf: a split arm OR fewer than 3 samples is low,
+      // 3–4 unanimous is medium, 5+ unanimous is high. A single sample can never
+      // support a confident attribution.
+      const unanimous = current.passed === 0;
+      const conf: TriageConfidence =
+        !unanimous || current.attempts < 3 ? "low" : current.attempts >= 5 ? "high" : "medium";
       reports.push({
         layer: layer.name,
         caseName: record.name,
         verdict: "model-drift",
-        reason: `inputs are byte-identical to the last-passing snapshot (${snap.at}) yet now fail ${current.attempts - current.passed}/${current.attempts} — nothing on your side changed; the provider's model behavior did`,
+        confidence: conf,
+        reason: `inputs are byte-identical to the last-passing snapshot (${snap.at}) yet now fail ${current.attempts - current.passed}/${current.attempts} — nothing on your side changed; the provider's model behavior did${bump(conf)}`,
         arms: [current],
         model: { snapshot: snap.model, current: currentModel },
       });
@@ -291,8 +334,9 @@ export async function triageFailures(
     }
     const snapshotArm = oldInputs ? await runArm("snapshot", record, layer, ctx, oldInputs, repeat) : null;
 
-    const { verdict, reason } = verdictOf(current, snapshotArm);
+    const { verdict, reason, confidence } = verdictOf(current, snapshotArm);
     reports.push({
+      ...(confidence ? { confidence } : {}),
       layer: layer.name,
       caseName: record.name,
       verdict,

@@ -28,6 +28,7 @@ import {
 import { triageFailures } from "./triage.js";
 import { TokenMeter, summarizeUsage } from "./usage.js";
 import { loadLedger, recordObservation, saveLedger } from "./ledger.js";
+import { loadPromptStore, savePromptStore } from "./changed.js";
 import type {
   CaseCtx,
   CaseDef,
@@ -69,6 +70,10 @@ export interface RunOptions {
   keepGoing?: boolean;
   updateBaseline?: boolean;
   triage?: boolean;
+  /** --changed-only: skip llm/judge cases whose resolved payload is unchanged */
+  changedOnly?: boolean;
+  /** layer names that must run every time even under --changed-only (canaries) */
+  always?: string[];
   log?: (line: string) => void;
   /** live progress callback for reporters */
   onCase?: (layer: LayerConfig, record: CaseRunRecord) => void;
@@ -92,6 +97,12 @@ export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Pro
   // then flags ordinary runs as regressions.
   const ledger = await loadLedger(config.baseDir);
   let ledgerDirty = false;
+  // --changed-only: payload fingerprints from prior runs, so an unchanged case
+  // can skip its paid call. Populated on EVERY run (whether or not --changed-only
+  // is set) so the flag has a baseline to compare against next time.
+  const promptStore = await loadPromptStore(config.baseDir);
+  let promptStoreDirty = false;
+  const alwaysSet = new Set(opts.always || []);
   const maxDrop = config.settings.maxDrop ?? 1;
   let gateBroken = false;
 
@@ -116,6 +127,9 @@ export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Pro
       lookup: makeLookup(envScope, layer.vars, saved),
       config,
       ledger,
+      changedOnly: opts.changedOnly,
+      alwaysRun: alwaysSet.has(layer.name),
+      promptStore,
     };
   };
 
@@ -212,6 +226,18 @@ export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Pro
           recordObservation(ledger, o.key, o.fp, o.obs);
           ledgerDirty = true;
         }
+        // Record the payload fingerprint ONLY for a case that actually ran AND
+        // passed. Recording on failure would let a red case be skipped as
+        // "unchanged" on the next --changed-only run — a broken test must keep
+        // re-running until it is green. A skipped-unchanged case (result.skipped)
+        // did not run, so its stored timestamp is left untouched.
+        if (result.promptFingerprint && result.ok && !result.skipped) {
+          promptStore.cases[result.promptFingerprint.key] = {
+            fp: result.promptFingerprint.fp,
+            at: startedAt.toISOString(),
+          };
+          promptStoreDirty = true;
+        }
         // judge baseline regression (runner owns the baseline file).
         // Skipped when the verdict is INCONCLUSIVE — we do not compare against
         // a number we just said we cannot trust.
@@ -281,6 +307,14 @@ export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Pro
   }
 
   if (ledgerDirty) await saveLedger(config.baseDir, ledger);
+  // Stamp the last FULL sweep (no layer/tag/grep filter) so a caller can tell
+  // how stale --changed-only skips are relative to possible model drift.
+  const fullRun = !opts.only?.length && !opts.tags?.length && !opts.grep;
+  if (fullRun) {
+    promptStore.lastFullRunAt = startedAt.toISOString();
+    promptStoreDirty = true;
+  }
+  if (promptStoreDirty) await savePromptStore(config.baseDir, promptStore);
   if (opts.updateBaseline) {
     const file = await saveBaseline(config.baseDir, baseline);
     log(`baseline updated: ${file}`);

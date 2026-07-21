@@ -22,11 +22,11 @@ test.after(async () => {
   await mock.close();
 });
 
-const CONFIG = `
+const CONFIG = (repeat = 3) => `
 providers:
   m: { kind: openai-compatible, baseUrl: "{{MOCK}}/v1", model: mock-1 }
 settings:
-  triage: { repeat: 3 }
+  triage: { repeat: ${repeat} }
 layers:
   - name: b
     kind: llm
@@ -35,9 +35,9 @@ layers:
     include: tests/*.yaml
 `;
 
-async function scaffold(promptWord) {
+async function scaffold(promptWord, { repeat = 3 } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), "heyllm-triage-"));
-  await writeFile(path.join(dir, "heyllm.yaml"), CONFIG.replaceAll("{{MOCK}}", mock.base));
+  await writeFile(path.join(dir, "heyllm.yaml"), CONFIG(repeat).replaceAll("{{MOCK}}", mock.base));
   await mkdir(path.join(dir, "tests"), { recursive: true });
   await mkdir(path.join(dir, "prompts"), { recursive: true });
   await writeFile(path.join(dir, "prompts/sys.txt"), `SAY: ${promptWord}\n`);
@@ -84,6 +84,38 @@ test("triage verdict: MODEL-DRIFT — inputs identical to snapshot, provider dri
     assert.equal(t.verdict, "model-drift", JSON.stringify(t));
     assert.match(t.reason, /byte-identical/);
     assert.equal(t.arms.length, 1); // diff shortcut: no tokens burned on the B arm
+    // n=3, 3/3 unanimous fail → medium, and it must SAY so (never present an
+    // n=3 attribution with the authority of a clean call).
+    assert.equal(t.confidence, "medium", JSON.stringify(t));
+    assert.match(t.reason, /confidence: medium/);
+  } finally {
+    await mock.setDrift(false);
+  }
+});
+
+test("triage confidence: a byte-identical drift at repeat:5 is high, at repeat:1 is low", async () => {
+  const dir = await scaffold("MAGIC", { repeat: 5 });
+  await run(dir, { updateBaseline: true });
+  await mock.setDrift(true);
+  try {
+    const red = await run(dir, { triage: true });
+    const t = red.triage.find((t) => t.caseName === "says-magic");
+    assert.equal(t.verdict, "model-drift");
+    assert.equal(t.confidence, "high", "5/5 unanimous fail is high confidence");
+    assert.doesNotMatch(t.reason, /raise settings.triage.repeat/, "high confidence needs no nudge");
+  } finally {
+    await mock.setDrift(false);
+  }
+
+  const dir1 = await scaffold("MAGIC", { repeat: 1 });
+  await run(dir1, { updateBaseline: true });
+  await mock.setDrift(true);
+  try {
+    const red = await run(dir1, { triage: true });
+    const t = red.triage.find((t) => t.caseName === "says-magic");
+    assert.equal(t.verdict, "model-drift");
+    assert.equal(t.confidence, "low", "a single sample cannot support a confident attribution");
+    assert.match(t.reason, /raise settings.triage.repeat/, "low confidence must ask for more samples");
   } finally {
     await mock.setDrift(false);
   }
@@ -91,7 +123,7 @@ test("triage verdict: MODEL-DRIFT — inputs identical to snapshot, provider dri
 
 test("triage verdict: FLAKY — isolated re-run passes", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "heyllm-triage-"));
-  await writeFile(path.join(dir, "heyllm.yaml"), CONFIG.replaceAll("{{MOCK}}", mock.base));
+  await writeFile(path.join(dir, "heyllm.yaml"), CONFIG().replaceAll("{{MOCK}}", mock.base));
   await mkdir(path.join(dir, "tests"), { recursive: true });
   await writeFile(
     path.join(dir, "tests/cases.yaml"),

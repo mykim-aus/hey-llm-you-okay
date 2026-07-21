@@ -216,7 +216,7 @@ export async function loadLayerCases(
 // `input`/`context` by judge, `note`/`capturedAt` are already here — a flat
 // id/url would collide the moment a new kind wants those names. One nested key
 // verified absent from every KIND_KEYS list costs a single COMMON entry.
-const COMMON_KEYS = ["name", "tags", "skip", "note", "capturedAt", "expect", "source"];
+const COMMON_KEYS = ["name", "tags", "skip", "note", "capturedAt", "expect", "source", "fingerprintIgnore"];
 // The file-mode static keys — mutually exclusive with `compare:`.
 const STATIC_FILE_KEYS = ["file", "files", "mustExist", "forbid", "require", "jsonValid", "yamlValid", "maxBytes"];
 

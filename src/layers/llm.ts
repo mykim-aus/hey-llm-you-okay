@@ -28,6 +28,8 @@ import type {
 import { ProviderError, callProvider, deepGet, interpolateDeep, resolveRef } from "../util.js";
 import { checkInputContract } from "../inputs.js";
 import { runDispatchBlock } from "./dispatch.js";
+import { caseKey } from "../baseline.js";
+import { fingerprintLlm, normalizeIgnore, unchangedSkipReason } from "../changed.js";
 
 const toArr = (v: unknown): string[] => (v === undefined ? [] : Array.isArray(v) ? v : [v as string]);
 
@@ -328,6 +330,20 @@ export async function runLlmCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult>
   // a hard failure that costs zero tokens.
   const contract = checkInputContract(cs, inputs, ctx.layer);
   if (contract.length) return { ok: false, failures: contract };
+
+  // --changed-only: if the EXACT payload (system + turns + tools + params +
+  // model) is byte-identical to this case's last run, skip before any paid call.
+  // The fingerprint is emitted regardless so a normal run refreshes the store.
+  const model = ctx.providers[ctx.layer.provider as string]?.model;
+  const ignore = normalizeIgnore(cs.fingerprintIgnore ?? (ctx.layer as any).fingerprintIgnore);
+  const fp = fingerprintLlm(inputs, model, ignore);
+  const key = caseKey(ctx.layer.name, cs.name);
+  const promptFingerprint = { key, fp };
+  if (ctx.changedOnly) {
+    const reason = unchangedSkipReason(ctx.promptStore, key, fp, !!ctx.alwaysRun);
+    if (reason) return { ok: true, failures: [], skipped: reason, promptFingerprint, resolvedInputs: inputs };
+  }
+
   const repeat = cs.repeat ?? ctx.layer.repeat ?? 1;
   const passRate = cs.passRate ?? ctx.layer.passRate ?? 1;
   const maxRounds = cs.maxRounds ?? 3;
@@ -390,5 +406,6 @@ export async function runLlmCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult>
     ...(cs.dispatch ? { dispatchState, dispatchEffects } : {}),
     resolvedInputs: inputs, // triage snapshots exactly what was sent
     attemptsDetail: attempts,
+    promptFingerprint, // runner records this into the changed-only store
   };
 }

@@ -119,3 +119,17 @@ test("REGRESSION: a call that threw is recorded as unmetered, not omitted", asyn
   assert.equal(t.unmetered, 1);
   assert.equal(t.complete, false, "omitting failed calls used to claim a complete measurement");
 });
+
+test("REGRESSION: a command judge is labelled by its command, not a stale model", async () => {
+  // A profile that overrides {kind: gemini, model: gemini-2.5-flash} to
+  // {kind: command, command: claude} leaves the gemini model behind (shallow
+  // merge). The token report used to call the Claude judge "gemini-2.5-flash".
+  const { createProviders } = await import("../dist/providers/index.js");
+  const p = createProviders({
+    judge: { kind: "command", model: "gemini-2.5-flash", command: "claude", args: ["-p"], outputPath: "result" },
+  });
+  assert.equal(p.judge.model, "claude", "a command provider is identified by what it runs");
+  // and non-command providers keep their real model
+  const g = createProviders({ g: { kind: "gemini", model: "gemini-2.5-flash", apiKeyEnv: "X" } });
+  assert.equal(g.g.model, "gemini-2.5-flash");
+});

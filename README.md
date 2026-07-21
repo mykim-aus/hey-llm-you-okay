@@ -1,82 +1,68 @@
 # hey llm, you okay?
 
-> **Ask your LLM pipeline that question on every commit.**
-> And when the answer is *no*, `heyllm` tells you whose fault it is — your prompt, or the provider's model drifting under you.
+> A team had **96 test files, all green**. The prompt those tests checked was one their
+> production server had never sent. The suite was faithfully testing a program they did not ship.
 
-A unified, pyramid-ordered LLM testing CLI. Define every test layer — static checks, wrapped legacy runners, HTTP integration, LLM behavior assertions, LLM-as-a-judge quality gates — in **one YAML file**, run them **cheap → expensive**, and when an AI test goes red, let the built-in **Automated Triage Protocol** tell you whether it's *your prompt's fault* or *the provider's model drifted*.
+That is the failure this tool is built around. Your LLM tests can be green for reasons that have nothing to do with whether the thing you ship works — the prompt drifted from production, the provider changed the model under you, the model called the right tool and your app still did nothing. **heyllm** is a single-YAML testing CLI whose whole design is aimed at one question: **when a test is green, was anything actually verified — and when it's red, whose fault is it?**
+
+The sharpest answer is `heyllm triage`. When an AI test fails, it re-runs the failing case against **both your current inputs and the last-passing snapshot** under today's model, and tells you the cause instead of leaving you to guess:
 
 ```
 $ heyllm triage
 
 ▸ static   [gate] 2/2 ✓        ← ms, free
-▸ api      [gate] 3/3 ✓        ← deterministic HTTP
 ▸ behavior [gate] 4/5 ✗        ← real model, deterministic asserts
 ▸ halted   quality             ← pyramid stopped: no tokens burned on a red build
 
 ◆ TRIAGE — AI failure adjudication (A/B probe)
-  MODEL-DRIFT behavior/refuses-to-quote-a-price
+  MODEL-DRIFT behavior/refuses-to-quote-a-price  (confidence: medium)
       inputs are byte-identical to the last-passing snapshot yet now fail 3/3 —
       nothing on your side changed; the provider's model behavior did
 ```
 
+`YOUR-CHANGE` means your diff broke it. `MODEL-DRIFT` means the provider did. `FLAKY` means it was noise — and every attribution carries a **confidence**, because an n=3 guess must not be dressed as a certainty (the same statistical humility the judge layer applies to itself).
+
+**[Read the two-day case study that produced that opening line →](CASE-STUDY.md)**
+
 ## Why heyllm
 
-**1. The Full-Stack Pyramid Runner.** One `heyllm.yaml` orchestrates all your test layers in cost order. Unit tests stay in Jest/Vitest/Playwright — heyllm **wraps** them (`exec` layer) instead of re-implementing them, so there is no double configuration. A failing **gated** layer halts the pyramid: your LLM budget is never spent on a build whose unit tests are already red.
+**1. A green that verified nothing is a bug — and heyllm refuses to print one.** This is the spine everything else hangs off. A skipped case is not a pass. An assertion-less case is not a pass. A provider you could not reach is not a pass (`◆ NOT VERIFIED`, exit 2). A case whose `system:` ref resolved to zero bytes ran no prompt, so it fails. And a suite can *assert* that the prompt it tests is the one production assembles — the exact gap behind the opening story. The pyramid mechanics are downstream of this: layers run cheap → expensive, a failing **gated** layer halts the run so no tokens burn on a build whose unit tests are already red, and your existing Jest/pytest/Playwright suites are **wrapped** (`exec`), not rewritten.
 
-**2. The Automated Triage Protocol** — the killer feature. A failing LLM test has three *fundamentally different* causes, each demanding a different action:
+**2. When it's red, it tells you whose fault it is — with a confidence.** A failing LLM test has three different causes needing three different actions:
 
 | verdict | meaning | what you do |
 |---|---|---|
 | `FLAKY` | isolated re-run passes — sampling noise | tune `repeat`/`passRate`, not code |
 | `YOUR-CHANGE` | last-passing inputs still work today; yours don't | fix your diff |
-| `MODEL-DRIFT` | even the last-passing inputs now fail | provider updated the model — re-baseline or adapt |
+| `MODEL-DRIFT` | even the last-passing inputs now fail | provider changed the model — re-baseline or adapt |
 
-`heyllm triage` adjudicates automatically: it isolates the failing case, re-runs it N×, then A/B-probes **current inputs vs. the last-passing snapshot** under *today's* model. Snapshots live in `.heyllm/baseline.json` (cheap, local, committed) — no `git checkout`, no double builds. Git is only a fallback (`git show` per file). And if your inputs are *byte-identical* to the snapshot, the B-arm is skipped entirely: the verdict is `MODEL-DRIFT` at zero extra cost.
+`heyllm triage` A/B-probes **current inputs vs. the last-passing snapshot** under today's model. Byte-identical inputs skip the B-arm — `MODEL-DRIFT` at zero extra cost. Crucially, **the verdict is not stated with more certainty than the sample supports**: a call from `repeat: 3` is labelled `confidence: medium` and asks you to raise `repeat` before acting, so an attribution tool never mis-attributes with a straight face. (That is the same statistical humility heyllm demands of the judge below — held to itself.)
 
-**3. The chain does not end at the model.** Asserting the tool call is table stakes — promptfoo, DeepEval and the agent frameworks all do it. Real bugs live one step later: the model calls the right tool and the UI still doesn't change. You *can* reach that with a custom JS assertion in other tools; heyllm gives it a first-class shape. A `dispatch` block folds the model's calls through **your** reducer and asserts the state a user would actually have seen — and it also runs standalone on **recorded** calls, so "model was right, app did nothing" is caught by a free, deterministic layer on every commit instead of a paid one.
+**3. It tells you when the judge cannot be trusted — on the axis where it actually breaks.** Measured on a real case: the same rubric item scored **(9,8) then (2,3) then (10,9)** across three runs. Agreement *within* each run was perfect, so a vote-spread check calls all three "stable" — and the middle run's tight agreement stamps confidence on a verdict 6 points off. The instability is on the **time** axis, and more votes cannot see it. heyllm keeps a run-axis ledger and returns **INCONCLUSIVE** when scores swing across runs — with attribution: an identical output hash means the *judge* moved, so the fix is a decision rule, not more samples.
 
-**4. It tells you when the judge cannot be trusted — on the axis where it actually breaks.** Measured on a real case: the same rubric item scored **(9,8) then (2,3) then (10,9)** across three runs. Agreement *within* each run was perfect, so a vote-spread check calls all three "stable" — and the middle run's tight agreement stamps confidence on a verdict 6 points off. The instability is on the **time** axis, and more votes cannot see it. heyllm keeps a run-axis ledger (`.heyllm/ledger.json`, written on pass **and** fail) and returns **INCONCLUSIVE** when scores swing across runs — with attribution: an identical output hash means the *judge* moved, so the fix is a decision rule, not more samples.
+**4. The chain does not end at the model.** Asserting the tool call is table stakes — promptfoo, DeepEval and the agent frameworks all do it. Real bugs live one step later: the model calls the right tool and the app still does nothing. A `dispatch` block folds the model's calls through **your** reducer and asserts the state a user would actually have reached — the panel that opened, the row that was written, the destructive query that was *refused*. It also runs standalone on **recorded** calls, so "model was right, app did nothing" is a free, deterministic gate.
 
-**5. The Self-Growing Corpus Ledger.** Every production complaint becomes a permanent regression test with one command:
+**5. Every production complaint becomes a permanent test.** `heyllm capture "…"` promotes one; `heyllm ingest export.jsonl` bulk-imports a whole feedback export — with provenance, dedup, and skip-until-reviewed so 275 imported rows can't become 275 vacuous passes.
 
-```bash
-heyllm capture "it keeps going off-topic when I ask about the refund policy" --tags prod,refund --note "CS #4821"
-# ✓ captured as captured-20260720-01 → tests/captured.yaml
-```
+## Does it find real bugs? And does it hold *itself* to this bar?
 
-The ledger is a normal YAML case file — reviewed in PRs, version-controlled, and executed on every run from then on.
+The first production project to adopt it — a hands-free voice assistant, 16 tools, 96 green test files — surfaced three shipped bugs in a day: a suite testing a prompt production never sent, an app that suppressed a visual then told the model it hadn't, and a whole conversation mode answering in the wrong language across 13 locales. The [case study](CASE-STUDY.md) is deliberately unflattering: none needed a new framework to find, and two fixes are plain Jest tests. The missing thing was **pointing the tests at what production runs**.
 
-## Does it find real bugs?
+An eval tool that is itself flaky is worth less than nothing, so heyllm is held to its own bar. It **tests itself** (`heyllm run` gates its own build), ships an offline end-to-end demo, and was put through an **adversarial audit that found six of its own silent-green paths** — a triage verdict stated too confidently, a probe that ignored a reducer's exit code, a metering rollup that double-counted a string — each fixed with a regression before release.
 
-In the first production project to adopt it — a hands-free voice assistant with
-16 tools, already covered by 96 green test files — three shipped bugs surfaced in
-one day: a suite validating a prompt production never sends, an app that
-suppressed a visual and then told the model it hadn't, and a whole conversation
-mode answering in the wrong language across 13 locales.
-
-The case study is deliberately unflattering about what that proves. None of the
-three needed a new framework to find; two of the fixes are plain Jest tests. What
-was missing was **checking that the tests pointed at what production runs** — and
-`heyllm`'s own trust gate got that wrong on first release too.
-
-**[Read the case study →](CASE-STUDY.md)**
+Concretely, on the codebase itself: **86% statement / 74% branch coverage** across 160+ tests. The honest part is *where* the gap is — it is almost entirely the **reporters and CLI wiring** (the JUnit/JSON writers, argument plumbing, colour output), not the verdict logic. The engine that decides pass/fail/inconclusive/drift is the most-covered layer; what is thinner is the code that *prints* those decisions. That is the right place for the gap to be, but it is a gap, and a wrong colour code or a malformed JUnit attribute is exactly the kind of thing it could hide.
 
 ## How it compares
 
-The honest version: **[promptfoo](https://www.promptfoo.dev)** (23k★) and **[DeepEval](https://deepeval.com)** (17k★) are larger, more mature, and do everything table-stakes that heyllm does — LLM-as-a-judge, tool-call assertions, multi-provider, CI exit codes, token reporting. If you want one eval runner with a big comparison-matrix UI, use promptfoo; if you live in pytest, use DeepEval. heyllm is shaped differently: it treats a test suite as a **cost-ordered pipeline** and is built to *attribute* a failure, not just report it.
+The honest version: **[promptfoo](https://www.promptfoo.dev)** (23k★) and **[DeepEval](https://deepeval.com)** (17k★) are larger, more mature, and share all the table-stakes with heyllm — **LLM-as-a-judge, tool-call assertions, multi-provider, CI exit codes, and token reporting are ✓ for all three**. If you want one eval runner with a big comparison-matrix UI, use promptfoo; if you live in pytest, use DeepEval. The table below is only the rows where the three *differ* — mostly heyllm's bet that a test suite is a cost-ordered pipeline that should *attribute* a failure, not just report it.
 
-| | heyllm | promptfoo | DeepEval |
+| where they differ | heyllm | promptfoo | DeepEval |
 |---|:--:|:--:|:--:|
 | Config format | YAML | YAML | Python |
-| LLM-as-a-judge | ✓ | ✓ | ✓ |
-| Tool / function-call assertions | ✓ | ✓ | ✓ |
-| Multi-provider | ✓ | ✓ | ✓ |
-| CI exit codes | ✓ | ✓ | ✓ |
-| Token reporting | ✓ | ✓ | ✓ |
 | Dollar cost estimate | ✗ *by design*¹ | ✓ | partial |
 | **Wraps your existing jest/pytest/playwright suites** as a gated stage | ✓ `exec` | reverse only² | pytest-only³ |
 | **Cheap deterministic checks gate the expensive model calls** | ✓ gated pyramid | ✗ | ✗ |
-| **Attributes a red test — your prompt vs the provider's drift** (A/B vs last-passing snapshot) | ✓ `triage` | manual | manual |
+| **Attributes a red test — your prompt vs the provider's drift**, with a confidence | ✓ `triage` | manual | manual |
 | **Judge reliability *across runs* → INCONCLUSIVE** (not just vote-spread in one run) | ✓ ledger | ✗ | ✗ |
 | **Asserts your APP's state** after folding tool calls through your reducer | ✓ `dispatch` | custom hook⁴ | custom metric⁴ |
 | **Asserts the test prompt is the one production sends** | ✓ `compare` / `inputs` | ✗ | ✗ |
@@ -84,16 +70,18 @@ The honest version: **[promptfoo](https://www.promptfoo.dev)** (23k★) and **[D
 
 <sub>¹ heyllm reports tokens but ships no price table — a vendored price is stale the day after, and `openai-compatible` covers zero-cost local models. ² promptfoo's Jest integration runs the *other* way: you call promptfoo matchers inside Jest, not your suite inside promptfoo. ³ DeepEval *is* pytest (Python only) — it co-runs your Python asserts, not jest/playwright. ⁴ reachable only via a custom JS/Python assertion you write yourself. ⁵ with provenance, dedup, and skip-until-reviewed so a 275-row import can't become 275 vacuous passes. ⁶ DeepEval natively loads JSONL into goldens, but has no feedback-specific ingestion.</sub>
 
-Adoption, for honesty: promptfoo ~1.6M npm installs/month, DeepEval ~6M PyPI/month (2026-07). heyllm is new and tiny beside them — this table is about *shape*, not popularity.
+None of these rows is a moat — a bigger tool could add any of them. The bet is that shipping them together, and holding the tool to "never a green that verified nothing," is worth more than any single row. Adoption, honestly: promptfoo ~1.6M npm installs/month, DeepEval ~6M PyPI/month (2026-07); heyllm is new and tiny beside them. This table is about *shape*, not popularity.
 
 ## Install & 60-second start
 
 ```bash
-npm i -D hey-llm-you-okay        # or: git clone && npm i && npm run build
-npx hey-llm-you-okay init        # scaffolds heyllm.yaml + tests/ + prompts/
-npx hey-llm-you-okay validate    # lint config & cases without executing
-npx hey-llm-you-okay run         # run the pyramid
+npm i -D hey-llm-you-okay        # the package name…
+npx heyllm init                  # …installs a `heyllm` command. Every example below uses it.
+npx heyllm validate              # lint config & cases without executing
+npx heyllm run                   # run the pyramid
 ```
+
+> The npm package is **`hey-llm-you-okay`**; the CLI it installs is **`heyllm`**. Install by the long name once, then it is `heyllm` (or `npx heyllm`) everywhere.
 
 Try the **fully offline demo** (no API keys — a mock provider simulates model drift):
 
@@ -416,7 +404,9 @@ cases:
 
 #### Rubrics that judges can actually agree on
 
-Ask about a **surface property** ("does it leak English?") and the grey zone eats you: is a grammar-note token a hint or not? Two judges reasonably disagree, and the spread was 8 points. Re-asking the same case as **request fulfilment** ("did it do what was asked, consistently with the context?") cut the spread to 3 and made two votes on one output identical.
+Ask a judge about a **surface property** — "is the tone appropriate?", "does it sound confident?", "is it too verbose?" — and the grey zone eats you: reasonable judges draw the line in different places, and the scores swing. Re-ask the *same* output as **request fulfilment** — "did it do what the user actually asked, given the context?" — and the disagreement collapses, because now there is a fact to check instead of a vibe to rate.
+
+This is not a hunch. In the [case study](CASE-STUDY.md), one rubric item phrased as a surface property scored across an 8-point range on a single output; rephrased as fulfilment, the spread fell to 3 and two independent votes became identical.
 
 For the checks that remain fuzzy, remove the scale entirely:
 
@@ -507,6 +497,8 @@ heyllm run --update-baseline   # green? freeze the new prompt as the snapshot
 
 Commit `.heyllm/baseline.json` with the prompt change — the snapshot and the prompt travel together through code review. Do **not** commit `.heyllm/ledger.json`: it is a per-run observation log that would conflict on every branch (`heyllm init` gitignores it for you).
 
+> **Known trade-off.** The baseline stores the *resolved* prompt per case, so two branches that both edit prompts will both regenerate it and can conflict on `baseline.json`. For a big prompt across many cases that file also carries real weight. It is committed on purpose — triage's A/B arm needs the last-passing input to exist — but the conflict blast radius is a real operational cost. If it bites, the mitigation is to regenerate the baseline on the merge target after merging, not to resolve the JSON by hand. Splitting the baseline into per-case files (to shrink the conflict radius) is on the roadmap, pending real-world validation that it is worth the extra file churn.
+
 ## Is the judge worth listening to?
 
 `heyllm doctor` reads that ledger and answers, with **zero model calls**:
@@ -575,7 +567,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 20 }
       - run: npm ci
-      - run: npx hey-llm-you-okay run --profile ci --triage --report junit
+      - run: npx heyllm run --profile ci --triage --report junit
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

@@ -4,8 +4,8 @@
  *
  *   heyllm run        [--config heyllm.yaml] [--profile ci] [--only a,b]
  *                     [--grep re] [--tags t1,t2] [--triage] [--update-baseline]
- *                     [--keep-going] [--report json|junit] [--report-file f]
- *                     [--verbose]
+ *                     [--keep-going] [--changed-only] [--always a,b]
+ *                     [--report json|junit] [--report-file f] [--verbose]
  *   heyllm triage     (run, then A/B-probe every AI failure; exit code from run)
  *   heyllm validate   (config + case lint, no execution)
  *   heyllm capture "input" [--name n] [--tags a,b] [--note ...] [--layer l]
@@ -44,6 +44,7 @@ const BOOL_FLAGS = new Set([
   "triage",
   "update-baseline",
   "keep-going",
+  "changed-only",
   "verbose",
   "help",
   "version",
@@ -72,6 +73,7 @@ const VALUE_FLAGS = new Set([
   "dedup",
   "dedup-threshold",
   "limit",
+  "always",
 ]);
 
 class UsageError extends Error {}
@@ -143,6 +145,18 @@ async function cmdRun(argv: Argv, forceTriage = false): Promise<number> {
       return 2;
     }
   }
+  // --always <layers>: canaries that must run every time even under
+  // --changed-only. A typo here would silently NOT run the canary, so validate.
+  const always = list(argv.flags.always);
+  if (always?.length) {
+    const known = config.layers.map((l) => l.name);
+    const unknown = always.filter((n) => !known.includes(n));
+    if (unknown.length) {
+      console.error(c.red(`unknown layer${unknown.length > 1 ? "s" : ""} in --always: ${unknown.join(", ")}`));
+      console.error(c.dim(`  available: ${known.join(", ")}`));
+      return 2;
+    }
+  }
   const summary = await runSuite(config, {
     only,
     grep: argv.flags.grep as string,
@@ -150,6 +164,8 @@ async function cmdRun(argv: Argv, forceTriage = false): Promise<number> {
     keepGoing: !!argv.flags["keep-going"],
     updateBaseline: !!argv.flags["update-baseline"],
     triage: forceTriage || !!argv.flags.triage,
+    changedOnly: !!argv.flags["changed-only"],
+    always,
     log: (line) => console.log(c.dim(`· ${line}`)),
   });
   printSummary(summary, !!argv.flags.verbose);
@@ -171,6 +187,24 @@ async function cmdRun(argv: Argv, forceTriage = false): Promise<number> {
   // failing test. Exiting 1 would tell CI "your prompt broke" when the truth is
   // "we never got to ask".
   if (summary.infra?.length) return 2;
+  // --changed-only where EVERYTHING was skipped-unchanged is a legitimate "no
+  // prompt moved, nothing to verify" — exit 0, but say so explicitly so it is
+  // never read as "N cases passed". (This is distinct from the infra all-skip
+  // above, which is "could not measure" → exit 2.)
+  if (argv.flags["changed-only"]) {
+    const ran = summary.layers.reduce(
+      (n, l) => n + l.cases.filter((r) => !r.result.skipped).length,
+      0
+    );
+    const skipped = summary.layers.reduce(
+      (n, l) => n + l.cases.filter((r) => r.result.skipped).length,
+      0
+    );
+    if (ran === 0 && skipped > 0)
+      console.log(
+        c.dim(`changed-only: ${skipped} case(s) unchanged, nothing to verify this run.`)
+      );
+  }
   // Zero cases ran despite an explicit selection — the filters matched nothing.
   // Reporting that as PASS is the quietest way to lose coverage.
   const ranCases = summary.layers.reduce((n, l) => n + l.cases.length, 0);
@@ -453,7 +487,7 @@ async function cmdInit(): Promise<number> {
     // baseline.json is a reviewed artifact and travels with the prompt change.
     // ledger.json is a per-run observation log — committing it conflicts on
     // every branch and tells reviewers nothing.
-    [".heyllm/.gitignore", "ledger.json\n"],
+    [".heyllm/.gitignore", "ledger.json\nprompts.json\n"],
     ["heyllm.yaml", INIT_CONFIG],
     ["tests/static/sanity.yaml", INIT_STATIC],
     ["tests/behavior/basics.yaml", INIT_BEHAVIOR],
@@ -495,6 +529,10 @@ common flags:
   --triage             A/B-probe AI failures after the run
   --update-baseline    record judge scores + prompt snapshots as the new baseline
   --keep-going         do not halt the pyramid on gated failures
+  --changed-only       skip llm/judge cases whose resolved payload (prompt +
+                       tools + params + model) is unchanged since their last run
+  --always a,b         layers that run every time even under --changed-only
+                       (canaries — catch model drift a payload hash cannot)
   --report json|junit  write a machine-readable report
   --verbose            per-case timing + judge vote reasoning`);
   return 0;

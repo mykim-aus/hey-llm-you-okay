@@ -52,6 +52,8 @@ import {
 import { itemFingerprint, itemKey, runAxisSpread, shortHash } from "../ledger.js";
 import { produceLlm, resolveLlmInputs } from "./llm.js";
 import { InputContractError, checkInputContract } from "../inputs.js";
+import { caseKey } from "../baseline.js";
+import { fingerprintLlm, fingerprintWith, normalizeIgnore, unchangedSkipReason } from "../changed.js";
 
 type FullRubric = RubricItem & { weight: number; ask: "scale" | "binary" };
 
@@ -276,6 +278,32 @@ export async function runJudgeCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResul
     ...(cs.reliability || {}),
   };
 
+  // --changed-only (subject-generating `input:` cases only): fingerprint the
+  // subject payload + the rubric + judge model, and skip BEFORE the paid subject
+  // and judge calls when nothing moved. The rubric is part of the fingerprint
+  // because judging by a different rubric IS a different test. Static output:/
+  // transcript: cases have no subject payload and always run.
+  let promptFingerprint: { key: string; fp: string } | undefined;
+  if (cs.input) {
+    try {
+      const subjInputs = await resolveLlmInputs(cs.input, ctx);
+      const subjModel = ctx.providers[ctx.layer.subject as string]?.model;
+      const judgeModel = ctx.providers[ctx.layer.judge as string]?.model;
+      const ignore = normalizeIgnore(cs.fingerprintIgnore ?? (ctx.layer as any).fingerprintIgnore);
+      const base = fingerprintLlm(subjInputs, subjModel, ignore);
+      const fp = fingerprintWith(base, { rubric: cs.rubric, judgeModel, scale, votes });
+      const key = caseKey(ctx.layer.name, cs.name);
+      promptFingerprint = { key, fp };
+      if (ctx.changedOnly) {
+        const reason = unchangedSkipReason(ctx.promptStore, key, fp, !!ctx.alwaysRun);
+        if (reason) return { ok: true, failures: [], skipped: reason, promptFingerprint, resolvedInputs: subjInputs };
+      }
+    } catch {
+      // resolution failure is surfaced by getSubjectOutput below with proper
+      // attribution — do not swallow it here, just skip the fingerprint.
+    }
+  }
+
   let subject: SubjectOutput;
   try {
     subject = await getSubjectOutput(cs, ctx);
@@ -426,5 +454,5 @@ export async function runJudgeCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResul
   }
 
   // baseline regression is applied by the runner (it owns the baseline file)
-  return { ...base, ok: !failures.length, failures };
+  return { ...base, ok: !failures.length, failures, ...(promptFingerprint ? { promptFingerprint } : {}) };
 }

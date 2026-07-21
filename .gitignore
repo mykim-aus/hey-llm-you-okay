@@ -6,3 +6,7 @@ examples/quickstart/.heyllm/
 examples/quickstart/tests/captured.yaml
 *.log
 .DS_Store
+
+# packaged tarballs and coverage output
+*.tgz
+coverage/

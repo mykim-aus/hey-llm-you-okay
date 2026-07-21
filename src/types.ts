@@ -374,6 +374,9 @@ export interface CaseResult {
   /** llm/judge — the exact inputs sent (triage snapshots these) */
   resolvedInputs?: ResolvedLlmInputs | null;
   attemptsDetail?: AttemptResult[];
+  /** llm/judge — fingerprint of the resolved payload, for --changed-only. The
+   *  runner records this into the prompt store when the case actually ran. */
+  promptFingerprint?: { key: string; fp: string };
 }
 
 export interface CaseCtx {
@@ -386,6 +389,14 @@ export interface CaseCtx {
   config: HeyLLMConfig;
   /** run-axis reliability history, loaded once per run by the runner */
   ledger?: LedgerFile;
+  /** --changed-only: skip a case whose resolved payload fingerprint is unchanged
+   *  since its last run. The layer computes the fingerprint (it owns the resolved
+   *  inputs); the runner owns loading/saving the store. */
+  changedOnly?: boolean;
+  /** this layer is named in --always: run every time, never skip on fingerprint */
+  alwaysRun?: boolean;
+  /** previous-run payload fingerprints, loaded once per run by the runner */
+  promptStore?: PromptStore;
 }
 
 export interface CaseRunRecord {
@@ -454,16 +465,25 @@ export interface TriageArm {
   failures: Failure[];
 }
 
+/** How much the sample size + arm separation justify the attribution.
+ *  An attribution tool that never says "I'm not sure" mis-attributes silently —
+ *  the same failure the judge layer's INCONCLUSIVE verdict exists to prevent,
+ *  applied to triage's own call. */
+export type TriageConfidence = "low" | "medium" | "high";
+
 export interface TriageReport {
   layer: string;
   caseName: string;
   verdict: TriageVerdict;
   reason: string;
+  /** absent for flaky/no-snapshot (not an attribution); present for the A/B calls */
+  confidence?: TriageConfidence;
   arms?: TriageArm[];
   model?: { snapshot?: string; current?: string };
 }
 
 import type { LedgerFile, LedgerObservation } from "./ledger.js";
+import type { PromptStore } from "./changed.js";
 
 // ── baseline / snapshot store ─────────────────────────────────────
 export interface SnapshotEntry {
