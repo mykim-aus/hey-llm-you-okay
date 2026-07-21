@@ -451,6 +451,58 @@ cases:
 
 A tool with no handler, a branch gated on stale state, an enum that drifted from the switch — all of it fails here instead of shipping. In the first project to adopt this, two of the three bugs it found lived exactly here: see the [case study](CASE-STUDY.md).
 
+#### `fold: [toolCalls, text]` — when the UI comes from what the model *said*
+
+Not every UI is driven by tool calls. A panel scraped from the assistant's spoken text, a "look at **X** on screen" line, a caption mirrored from the reply — these derive from the model's **text**, and a tool-calls-only fold never sees them. The real bug: the model says *"read 'He has lost it.'"* while the panel still shows a stale *'I have watched the movie.'* from the previous turn — the two disagree, and nothing caught it.
+
+Add `text` to the fold and the model's reply is folded as an event too (`{ name: "say", args: { text } }`, after the tool calls — the order real apps see):
+
+```yaml
+kind: llm
+cases:
+  - name: featured-example-goes-on-screen-before-its-read
+    system: file:../../prompts/tutor.txt
+    prompt: "read me an example for the present-perfect pattern"
+    dispatch:
+      module: ../../app/screenReducer.js
+      fold: [toolCalls, text]        # ← fold the tool calls AND the spoken text
+      textEvent: say                 # optional; the reducer event name (default "say")
+      initialState: { panel: null }
+      expect: { state: { panel: { kind: examples } } }
+```
+
+Default is `[toolCalls]` — existing dispatch cases are unchanged.
+
+#### Multi-turn: UI state **threads across turns**
+
+Put `dispatch` on a `conversation:` case and the state is threaded turn-to-turn — each turn's response folds onto the running state, and each turn asserts what the screen shows **after** it. This is the joint where a turn-2 panel still shows the turn-1 example:
+
+```yaml
+kind: llm
+cases:
+  - name: switching-example-clears-the-stale-one
+    system: file:../../prompts/tutor.txt
+    dispatch: { module: ../../app/screenReducer.js, fold: [text], initialState: { panel: null } }
+    conversation:
+      - user: "make a sentence with 'must'"
+        expect: { state: { panel: { kind: examples, word: must } } }
+      - user: "now try 'should'"
+        expect: { state: { panel: null } }        # the 'must' example must NOT linger
+```
+
+A wrong per-turn expectation fails with the turn index (`turn[1].dispatch.state`), so you see exactly where the screen and the speech drifted apart.
+
+#### `responseSchema` — grade the shape you actually ship
+
+If your app forces the model into a JSON schema (Gemini `responseSchema` / OpenAI `json_schema`), reproduce that contract so the test grades the structured output — not freeform text the harness happened to get:
+
+```yaml
+    params:
+      responseSchema: { type: object, properties: { intent: { type: string } }, required: [intent] }
+```
+
+Fold cases cache too: under `--changed-only`, a single-turn `dispatch` case **replays its UI outcome from the cached response at zero model cost** — the whole "response → UI" matrix re-verifies for free until a prompt actually changes.
+
 ### `judge` — LLM-as-a-judge
 
 ```yaml
@@ -773,11 +825,29 @@ Dedup is exact-by-digest always, `--dedup near` (trigram Jaccard) opt-in — a f
 
 ```
 heyllm run          run the pyramid          --only a,b --grep re --tags t1,t2
+heyllm pipelines    dashboard: what exists, how it flows, last-run results   --verbose
 heyllm ingest       bulk-import a JSONL export  --map input=<path> --dedup near --dry-run
 heyllm triage       run + A/B probe          --update-baseline --keep-going
 heyllm validate     lint without executing   --profile ci
 heyllm capture      grow the golden corpus   "input" --tags a,b --note ...
 heyllm init         scaffold a new project
+```
+
+`heyllm pipelines` (aliases `status`, `ls`) is a zero-cost dashboard — it reads the config and the last run, no model calls. See every pipeline, the gated pyramid it flows through, and how each stage did last time, at a glance:
+
+```
+◆ heyllm  7 pipelines  ·  gated pyramid: cheap → expensive, a failing gate halts the rest
+  last run  PASS  ·  34/36 cases  ·  9 cached  ·  2 unchanged  ·  1.3s  ·  3m ago
+
+  ●  hygiene    static    gate   4 cases   ✓4                       44ms
+  │
+  ●  dispatch   dispatch  gate   9 cases   ✓9                       16ms
+  │
+  ●  behavior   llm              11 cases  ✓9 ○2 ⋯9                 44.1s
+  │
+  ●  quality    judge            3 cases   ✓1 ○2                    15.8s
+
+  ✓ pass   ✗ fail   ○ skipped/unchanged   ⋯ cached replay   ⊘ halted   gate halts on fail
 ```
 
 ## Programmatic API

@@ -23,11 +23,35 @@ import { censusSystemSources, formatSystemCensus } from "./inputs.js";
 import { loadLedger, runAxisSpread, sameEvidenceDifferentScore } from "./ledger.js";
 import { ConfigError, loadConfig, loadLayerCases, validateCases } from "./config.js";
 import { printSummary } from "./report/console.js";
+import { renderPipelines, type PipelineStage } from "./report/pipelines.js";
 import { writeJsonReport } from "./report/json.js";
 import { writeJunitReport } from "./report/junit.js";
 import { runSuite } from "./runner.js";
 import { readFileSync } from "node:fs";
+import type { RunSummary } from "./types.js";
 import { c } from "./util.js";
+
+/** The pipeline dashboard reads the last run from here (per-run, gitignored). */
+const LAST_RUN_FILE = ".heyllm/last-run.json";
+
+/** Persist the run for `heyllm pipelines`, MERGING per-stage so a filtered
+ *  (--only) run updates just those stages and keeps the rest's last result. */
+async function persistLastRun(baseDir: string, summary: RunSummary): Promise<void> {
+  try {
+    const file = path.join(baseDir, LAST_RUN_FILE);
+    let merged = summary;
+    try {
+      const prior = JSON.parse(readFileSync(file, "utf8")).summary as RunSummary;
+      const now = new Set(summary.layers.map((l) => l.name));
+      const kept = prior.layers.filter((l) => !now.has(l.name));
+      if (kept.length) merged = { ...summary, layers: [...summary.layers, ...kept] };
+    } catch {}
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, JSON.stringify({ at: new Date().toISOString(), summary: merged }, null, 2));
+  } catch {
+    /* a dashboard cache write must never break a run */
+  }
+}
 
 /** Single source of truth for the version — a hardcoded string drifts from
  *  package.json (it did: package 0.1.1 while --version printed 0.1.0). */
@@ -169,6 +193,7 @@ async function cmdRun(argv: Argv, forceTriage = false): Promise<number> {
     log: (line) => console.log(c.dim(`· ${line}`)),
   });
   printSummary(summary, !!argv.flags.verbose);
+  await persistLastRun(config.baseDir, summary);
 
   const kind = argv.flags.report as string | undefined;
   if (kind) {
@@ -243,6 +268,41 @@ async function cmdValidate(argv: Argv): Promise<number> {
     return 2;
   }
   console.log(c.green(`\nOK — ${config.layers.length} layers, ${total} cases, providers: ${Object.keys(config.providers).join(", ") || "(none)"}`));
+  return 0;
+}
+
+/**
+ * `heyllm pipelines` — the dashboard. What pipelines exist, how they flow (the
+ * gated pyramid), and how each did on the last run. Zero model calls: it reads
+ * the config + the persisted last run. `--verbose` also lists each stage's tags.
+ */
+async function cmdPipelines(argv: Argv): Promise<number> {
+  const config = await loadConfig(argv.flags.config as string, { profile: argv.flags.profile as string });
+  const stages: PipelineStage[] = [];
+  for (const layer of config.layers) {
+    const groups = await loadLayerCases(layer, config.baseDir, config.settings?.capture?.file);
+    const cases = groups.flatMap((g) => g.cases);
+    const tags = [...new Set(cases.flatMap((cs) => (Array.isArray(cs.tags) ? cs.tags : [])))];
+    const driver =
+      layer.kind === "judge"
+        ? [layer.subject, layer.judge].filter(Boolean).join(" → ")
+        : layer.provider;
+    stages.push({ name: layer.name, kind: layer.kind, gate: layer.gate, count: cases.length, tags, driver });
+  }
+
+  let summary: RunSummary | null = null;
+  let ageMs: number | undefined;
+  try {
+    const raw = JSON.parse(readFileSync(path.join(config.baseDir, LAST_RUN_FILE), "utf8"));
+    summary = raw.summary as RunSummary;
+    if (raw.at) ageMs = Date.now() - new Date(raw.at).getTime();
+  } catch {
+    /* no last run yet — the dashboard says so */
+  }
+
+  console.log("");
+  for (const line of renderPipelines(stages, summary, { verbose: !!argv.flags.verbose, ageMs })) console.log(line);
+  console.log("");
   return 0;
 }
 
@@ -487,7 +547,7 @@ async function cmdInit(): Promise<number> {
     // baseline.json is a reviewed artifact and travels with the prompt change.
     // ledger.json is a per-run observation log — committing it conflicts on
     // every branch and tells reviewers nothing.
-    [".heyllm/.gitignore", "ledger.json\nprompts.json\n"],
+    [".heyllm/.gitignore", "ledger.json\nprompts.json\nlast-run.json\n"],
     ["heyllm.yaml", INIT_CONFIG],
     ["tests/static/sanity.yaml", INIT_STATIC],
     ["tests/behavior/basics.yaml", INIT_BEHAVIOR],
@@ -513,6 +573,7 @@ function help(): number {
 
 commands:
   run        run the layer pyramid (cheap → expensive, gated halt)
+  pipelines  dashboard: what pipelines exist, how they flow, last-run results (no model calls)
   triage     run, then A/B-probe every AI failure (flaky | your-change | model-drift)
   validate   lint config + case files without executing
   doctor     read the run-axis ledger: which rubric items can be trusted (no model calls)
@@ -564,6 +625,10 @@ export async function main(argv: string[]): Promise<number> {
         return await cmdRun(parsed, true);
       case "validate":
         return await cmdValidate(parsed);
+      case "pipelines":
+      case "status":
+      case "ls":
+        return await cmdPipelines(parsed);
       case "capture":
         return await cmdCapture(parsed);
       case "ingest":

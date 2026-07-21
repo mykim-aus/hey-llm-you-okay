@@ -46,6 +46,11 @@ export interface ChatRequest {
   maxTokens?: number;
   /** ask the provider for JSON-mode output when supported */
   json?: boolean;
+  /** enforce a structured-output JSON schema (Gemini responseSchema / OpenAI
+   *  json_schema). Lets a case reproduce the SAME contract the app ships, so the
+   *  test grades the shape the model is actually forced into — not freeform text
+   *  the harness happened to get. Anthropic (no native schema) ignores it. */
+  responseSchema?: unknown;
 }
 
 export interface TokenUsage {
@@ -189,6 +194,17 @@ export interface DispatchSpec {
   timeoutMs?: number;
   initialState?: unknown;
   expect?: Record<string, unknown>;
+  /** which parts of the model's response to fold into the reducer, in order.
+   *  Default ["toolCalls"] (backward-compatible). Add "text" to ALSO fold the
+   *  model's spoken/written text as an event — for UI that derives from content,
+   *  not just tool calls (e.g. a panel scraped from what the assistant said).
+   *  The real bug this closes: the model says "look at X on screen" while the
+   *  panel shows a stale Y, because the UI came from TEXT the tool-only fold
+   *  never saw. */
+  fold?: Array<"toolCalls" | "text">;
+  /** name of the synthetic event carrying the model's text when fold includes
+   *  "text" (default "say"). The reducer receives { name, args: { text } }. */
+  textEvent?: string;
 }
 
 /** A case is YAML-authored; `name` is the only universally required field. */

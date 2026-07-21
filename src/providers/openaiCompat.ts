@@ -80,6 +80,8 @@ export function openaiCompat(cfg: ProviderConfig, name: string) {
       if (req.maxTokens)
         body[cfg.maxTokensParam ?? (reasoning ? "max_completion_tokens" : "max_tokens")] = req.maxTokens;
       if (req.json) body.response_format = { type: "json_object" };
+      if (req.responseSchema)
+        body.response_format = { type: "json_schema", json_schema: { name: "schema", schema: req.responseSchema, strict: true } };
 
       const headers: Record<string, string> = {};
       if (cfg.apiKey) headers.authorization = `Bearer ${cfg.apiKey}`;

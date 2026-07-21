@@ -72,6 +72,10 @@ export function gemini(cfg: ProviderConfig, name: string) {
       if (req.temperature !== undefined && req.temperature !== null) gen.temperature = req.temperature;
       if (req.maxTokens) gen.maxOutputTokens = req.maxTokens;
       if (req.json) gen.responseMimeType = "application/json";
+      if (req.responseSchema) {
+        gen.responseMimeType = "application/json"; // a schema implies JSON output
+        gen.responseSchema = req.responseSchema; // native Gemini structured output
+      }
       if (Object.keys(gen).length) body.generationConfig = gen;
 
       const out = await postJson(`${base}/models/${cfg.model}:generateContent`, {

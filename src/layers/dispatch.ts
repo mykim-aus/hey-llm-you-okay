@@ -290,7 +290,10 @@ export function checkDispatchMode(spec: Record<string, any>): string | null {
 // The keys a dispatch spec / block may carry. An unknown key is almost always a
 // typo (`expct:`), and silently dropping it discards the assertion — a green
 // tick for a check that never ran.
-const DISPATCH_BLOCK_KEYS = new Set(["module", "export", "command", "args", "cwd", "env", "timeoutMs", "initialState", "expect", "calls"]);
+const DISPATCH_BLOCK_KEYS = new Set(["module", "export", "command", "args", "cwd", "env", "timeoutMs", "initialState", "expect", "calls", "fold", "textEvent"]);
+
+/** Valid values for a dispatch block's `fold:` list. */
+const FOLD_PARTS = new Set(["toolCalls", "text"]);
 
 /**
  * Validate a dispatch spec (or the embedded `dispatch:` block) at RUN time — the
@@ -299,7 +302,7 @@ const DISPATCH_BLOCK_KEYS = new Set(["module", "export", "command", "args", "cwd
  * null. `embedded` = the `dispatch:` block on an llm case, whose calls come from
  * the model, so it has no `calls:` key of its own.
  */
-export function checkDispatchSpec(spec: Record<string, any>, embedded: boolean): string | null {
+export function checkDispatchSpec(spec: Record<string, any>, embedded: boolean, requireExpect = true): string | null {
   const mode = checkDispatchMode(spec);
   if (mode) return mode;
   const allowed = embedded ? DISPATCH_BLOCK_KEYS : DISPATCH_BLOCK_KEYS;
@@ -310,9 +313,39 @@ export function checkDispatchSpec(spec: Record<string, any>, embedded: boolean):
       const near = k === "expct" || k === "expects" ? " (did you mean 'expect'?)" : "";
       return `unknown dispatch key '${k}'${near} — a typo'd key is silently dropped, which would discard the assertion`;
     }
-  if (spec.expect === undefined)
+  if (spec.fold !== undefined) {
+    if (!Array.isArray(spec.fold) || !spec.fold.length)
+      return "'fold' must be a non-empty list of ['toolCalls', 'text']";
+    const bad = spec.fold.filter((p: unknown) => typeof p !== "string" || !FOLD_PARTS.has(p as string));
+    if (bad.length) return `'fold' has unknown part(s) ${JSON.stringify(bad)} — allowed: 'toolCalls', 'text'`;
+  }
+  if (spec.textEvent !== undefined && (typeof spec.textEvent !== "string" || !spec.textEvent.trim()))
+    return "'textEvent' must be a non-empty string (the reducer event name for the model's text)";
+  if (requireExpect && spec.expect === undefined)
     return "needs 'expect' — a dispatch case with no assertion passes without verifying anything";
   return null;
+}
+
+/** The model output an llm case folds: tool calls the model produced + the text it said. */
+export interface FoldInput {
+  toolCalls: ToolCall[];
+  text?: string;
+}
+
+/**
+ * Turn a model response into the ordered event list the reducer folds, per the
+ * block's `fold:`. Default ["toolCalls"] (tool calls only, as before). With
+ * "text", the model's text is appended as a { name: textEvent, args: { text } }
+ * event AFTER the tool calls — matching real life, where the app's tool handlers
+ * fire during the turn and the full spoken text is known when the turn ends.
+ */
+export function buildFoldEvents(model: FoldInput, spec: DispatchSpec): DispatchCall[] {
+  const fold = spec.fold ?? ["toolCalls"];
+  const events: DispatchCall[] = [];
+  if (fold.includes("toolCalls")) events.push(...model.toolCalls.map((c) => ({ name: c.name, args: c.args })));
+  if (fold.includes("text") && model.text && model.text.trim())
+    events.push({ name: spec.textEvent ?? "say", args: { text: model.text } });
+  return events;
 }
 
 /** Fold calls through the reducer, accumulating state and effects. */
@@ -351,13 +384,56 @@ export function checkDispatchExpect(
     applyExpect(rest, { json: outcome.state, text: JSON.stringify(outcome.state) }, failures);
 }
 
-/** Run a `dispatch:` block against tool calls the model actually produced. */
+/**
+ * A stateful folder — the reducer loaded ONCE, state THREADED across turns.
+ * For multi-turn UI: each conversation turn folds its response onto the running
+ * state, so a turn-2 stale panel that turn-1 set (the "example lags a turn"
+ * bug) becomes assertable per turn. Effects accumulate across turns.
+ */
+export interface Folder {
+  /** fold this turn's response onto the running state; returns the cumulative outcome */
+  fold(model: FoldInput): Promise<DispatchOutcome>;
+  /** total events folded across all turns — zero means the reducer never ran */
+  totalEvents(): number;
+  state(): unknown;
+}
+
+export async function createFolder(spec: DispatchSpec, ctx: CaseCtx): Promise<Folder> {
+  // Per-turn conversation folds carry their assertions in each turn's `expect`,
+  // so a block-level `expect` is optional here (requireExpect: false).
+  const problem = checkDispatchSpec(spec as any, true, false);
+  if (problem) throw new Error(problem);
+  const reduce = await makeReducer(spec, ctx.baseDir);
+  let state: unknown = structuredClone(spec.initialState ?? {});
+  const allEffects: unknown[] = [];
+  let total = 0;
+  return {
+    async fold(model) {
+      const events = buildFoldEvents(model, spec);
+      total += events.length;
+      const out = await foldCalls(reduce, state, events);
+      state = out.state;
+      allEffects.push(...out.effects);
+      return { state, effects: allEffects };
+    },
+    totalEvents: () => total,
+    state: () => state,
+  };
+}
+
+/**
+ * Run a `dispatch:` block against what the model actually produced. `model` is
+ * the tool calls + text; `buildFoldEvents` turns it into the reducer event list
+ * per the block's `fold:`. Accepts a bare ToolCall[] too, for callers that only
+ * fold tool calls (back-compat).
+ */
 export async function runDispatchBlock(
   spec: DispatchSpec,
-  toolCalls: ToolCall[],
+  model: FoldInput | ToolCall[],
   ctx: CaseCtx,
   failures: Failure[]
 ): Promise<DispatchOutcome | null> {
+  const input: FoldInput = Array.isArray(model) ? { toolCalls: model } : model;
   // Full spec validation runs for the llm-embedded block too. validateCases
   // covers kind: dispatch cases only, and it never runs under `heyllm run` — so
   // a block with both modes, or a typo'd `expct:` that discards the assertion,
@@ -374,25 +450,24 @@ export async function runDispatchBlock(
     failures.push({ path: spec.command ? "dispatch.command" : "dispatch.module", message: e.message });
     return null;
   }
-  // Zero tool calls means the reducer was never exercised, so `expect` is
-  // scored against the untouched initialState and passes vacuously. That is a
-  // green tick for a chain nothing traversed.
-  if (!toolCalls.length) {
+  const events = buildFoldEvents(input, spec);
+  // Zero events means the reducer was never exercised, so `expect` is scored
+  // against the untouched initialState and passes vacuously. That is a green
+  // tick for a chain nothing traversed.
+  if (!events.length) {
     const probeFailure = (reduce as any).probeFailure;
+    const foldsText = (spec.fold ?? ["toolCalls"]).includes("text");
+    const nothing = foldsText ? "no tool calls and no text" : "no tool calls";
     failures.push({
       path: "dispatch",
       message: probeFailure
-        ? `the model produced no tool calls, and ${probeFailure}`
-        : `the model produced no tool calls, so the reducer never ran — nothing about the app was verified`,
+        ? `the model produced ${nothing}, and ${probeFailure}`
+        : `the model produced ${nothing}, so the reducer never ran — nothing about the app was verified`,
     });
     return null;
   }
   try {
-    const outcome = await foldCalls(
-      reduce,
-      structuredClone(spec.initialState ?? {}),
-      toolCalls.map((c) => ({ name: c.name, args: c.args }))
-    );
+    const outcome = await foldCalls(reduce, structuredClone(spec.initialState ?? {}), events);
     checkDispatchExpect(spec.expect, outcome, failures);
     return outcome;
   } catch (e: any) {

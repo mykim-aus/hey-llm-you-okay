@@ -20,6 +20,7 @@ import type {
   CaseDef,
   CaseResult,
   ChatMessage,
+  ConvTurn,
   Failure,
   Provider,
   ResolvedLlmInputs,
@@ -27,7 +28,7 @@ import type {
 } from "../types.js";
 import { ProviderError, callProvider, deepGet, interpolateDeep, resolveRef } from "../util.js";
 import { checkInputContract } from "../inputs.js";
-import { runDispatchBlock } from "./dispatch.js";
+import { checkDispatchExpect, createFolder, runDispatchBlock, type Folder } from "./dispatch.js";
 import { caseKey } from "../baseline.js";
 import { changedRunReason, fingerprintLlm, isCacheStale, normalizeIgnore, unchangedSkipReason } from "../changed.js";
 
@@ -127,6 +128,7 @@ async function completeTurn(
         temperature: inputs.params.temperature,
         maxTokens: inputs.params.maxTokens,
         json: inputs.params.json,
+        responseSchema: inputs.params.responseSchema,
       })
     );
     text += (text && res.text ? " " : "") + (res.text || "");
@@ -178,6 +180,21 @@ function safeJson(text: string): unknown {
 function buildActual(turn: TurnOutcome): LlmActual {
   const text = turn.lastText || turn.text;
   return { text, fullText: turn.text, json: safeJson(text), toolCalls: turn.toolCalls, toolNames: turn.toolCalls.map((c) => c.name) };
+}
+
+/** Split a turn's expect into the UI-state part (state/effects → the fold) and
+ *  the model part (toolCalled/text/... → checkLlmExpect). */
+function splitStateExpect(expect: Record<string, unknown> | undefined): {
+  stateExpect: Record<string, unknown>;
+  llmExpect: Record<string, unknown>;
+} {
+  const stateExpect: Record<string, unknown> = {};
+  const llmExpect: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(expect || {})) {
+    if (k === "state" || k === "effects") stateExpect[k] = v;
+    else llmExpect[k] = v;
+  }
+  return { stateExpect, llmExpect };
 }
 
 /** llm-specific expect keys first, then generic assert.js keys. */
@@ -279,7 +296,19 @@ export interface ProduceResult extends TurnOutcome {
 export async function produceLlm(
   provider: Provider,
   inputs: ResolvedLlmInputs,
-  { maxRounds = 3, perTurnFailures }: { maxRounds?: number; perTurnFailures?: Failure[] } = {}
+  {
+    maxRounds = 3,
+    perTurnFailures,
+    onTurn,
+  }: {
+    maxRounds?: number;
+    perTurnFailures?: Failure[];
+    /** conversation mode: called after each turn with that turn's outcome, so
+     *  the caller can fold it into UI state and assert per-turn (multi-turn UI).
+     *  When provided, it OWNS the per-turn assertions (the default checkLlmExpect
+     *  is skipped to avoid double-checking). */
+    onTurn?: (turn: TurnOutcome, index: number, turnDef: ConvTurn) => Promise<void> | void;
+  } = {}
 ): Promise<ProduceResult> {
   if (inputs.mode === "conversation") {
     let messages: ChatMessage[] = [];
@@ -301,7 +330,9 @@ export async function produceLlm(
         });
         break;
       }
-      if (turn.expect && perTurnFailures) {
+      if (onTurn) {
+        await onTurn(last, i, turn);
+      } else if (turn.expect && perTurnFailures) {
         const fs: Failure[] = [];
         checkLlmExpect(turn.expect, buildActual(last), fs);
         for (const f of fs) perTurnFailures.push({ ...f, path: `turn[${i}].${f.path}` });
@@ -357,9 +388,13 @@ export async function runLlmCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult>
       // Input unchanged and fresh. Rather than skip (and report nothing), REPLAY the
       // cached model output through the assertions — a real verdict at zero
       // API cost. This also re-checks a changed `expect:` (which is not part of
-      // the fingerprint) against the same output for free. Only when the output
-      // was cached and there is no dispatch fold to reproduce; otherwise skip.
-      if (prev.output && !cs.dispatch) {
+      // the fingerprint) against the same output for free. The cached output
+      // carries { text, fullText, toolCalls } — enough to also RE-FOLD a
+      // dispatch block (the model's UI outcome, replayed for free). Only
+      // conversation+dispatch cases can't be replayed from one final output
+      // (per-turn state); they were never cached, so prev.output is absent →
+      // they fall through to the plain skip below.
+      if (prev.output) {
         const cachedActual: LlmActual = {
           text: prev.output.text,
           fullText: prev.output.fullText,
@@ -369,11 +404,26 @@ export async function runLlmCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult>
         };
         const failures: Failure[] = [];
         checkLlmExpect(cs.expect, cachedActual, failures);
+        let dispatchState: unknown;
+        let dispatchEffects: unknown[] | undefined;
+        if (cs.dispatch) {
+          const outcome = await runDispatchBlock(
+            cs.dispatch,
+            { toolCalls: cachedActual.toolCalls, text: cachedActual.fullText },
+            ctx,
+            failures
+          );
+          if (outcome) {
+            dispatchState = outcome.state;
+            dispatchEffects = outcome.effects;
+          }
+        }
         return {
           ok: !failures.length,
           failures,
           cached: `input unchanged since ${prev.at} — replayed the cached output (no model call)`,
           detail: { attempts: 0, cached: true, toolNames: cachedActual.toolNames },
+          ...(cs.dispatch ? { dispatchState, dispatchEffects } : {}),
           resolvedInputs: inputs,
           // do NOT re-emit promptFingerprint: a cached replay must not overwrite
           // the stored output (it would re-timestamp without a fresh run).
@@ -402,23 +452,53 @@ export async function runLlmCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult>
   // passed (in which case the case fails and nothing gets cached anyway).
   let passingActual: LlmActual | undefined;
   let lastActual: LlmActual | undefined;
+  // conversation + dispatch: fold each turn onto a THREADED state and assert
+  // per-turn `expect.state` — the multi-turn UI joint (a turn-2 stale panel that
+  // turn-1 set). Single-turn dispatch stays a post-hoc fold of the one response.
+  const convFold = !!cs.dispatch && inputs.mode === "conversation";
   for (let i = 0; i < repeat; i++) {
     const failures: Failure[] = [];
+    let folder: Folder | null = null;
+    let foldOutcome: { state: unknown; effects: unknown[] } | undefined;
+    const onTurn = convFold
+      ? async (turn: TurnOutcome, ti: number, turnDef: ConvTurn) => {
+          if (!folder) folder = await createFolder(cs.dispatch, ctx); // fresh per attempt
+          const a = buildActual(turn);
+          const { stateExpect, llmExpect } = splitStateExpect(turnDef.expect);
+          const fs: Failure[] = [];
+          checkLlmExpect(llmExpect, a, fs);
+          foldOutcome = await folder.fold({ toolCalls: turn.toolCalls, text: a.fullText });
+          checkDispatchExpect(stateExpect, foldOutcome, fs, "dispatch");
+          for (const f of fs) failures.push({ ...f, path: `turn[${ti}].${f.path}` });
+        }
+      : undefined;
     try {
-      const out = await produceLlm(provider, inputs, { maxRounds, perTurnFailures: failures });
+      const out = await produceLlm(provider, inputs, { maxRounds, perTurnFailures: failures, onTurn });
       const actual = buildActual(out);
       lastActual = actual;
       checkLlmExpect(cs.expect, actual, failures);
-      if (!failures.length && !passingActual) passingActual = actual;
-      // the chain does not end at the model: fold its calls through the app's
-      // reducer and assert the state the user would actually have seen
-      if (cs.dispatch) {
-        const outcome = await runDispatchBlock(cs.dispatch, actual.toolCalls, ctx, failures);
+      // the chain does not end at the model: fold its response through the app's
+      // reducer and assert the state the user would actually have seen.
+      if (convFold) {
+        if (folder && (folder as Folder).totalEvents() === 0)
+          failures.push({
+            path: "dispatch",
+            message: "no tool calls and no text were folded across the whole conversation — the reducer never ran",
+          });
+        if (foldOutcome) {
+          dispatchState = foldOutcome.state;
+          dispatchEffects = foldOutcome.effects;
+        }
+      } else if (cs.dispatch) {
+        const outcome = await runDispatchBlock(cs.dispatch, { toolCalls: actual.toolCalls, text: actual.fullText }, ctx, failures);
         if (outcome) {
           dispatchState = outcome.state;
           dispatchEffects = outcome.effects;
         }
       }
+      // record a passing attempt AFTER the fold ran — the cached replay must
+      // agree with the live verdict, which includes the UI outcome.
+      if (!failures.length && !passingActual) passingActual = actual;
       attempts.push({ ok: !failures.length, failures, toolNames: actual.toolNames, text: actual.text });
     } catch (e: any) {
       const infra = e instanceof ProviderError;
@@ -452,12 +532,14 @@ export async function runLlmCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult>
       });
     failures.push(...(attempts.find((a) => !a.ok && !(a.failures || []).some((f) => f.infra))?.failures || []));
   }
-  // Cache a PASSING attempt's output for a future --changed-only replay — only
-  // for a dispatch-free case (a fold cannot be reproduced from text) and only
-  // when the case passed (record-on-pass mirrors the fingerprint policy). Using
-  // the passing attempt, not the last, keeps the replay verdict equal to live.
+  // Cache a PASSING attempt's output for a future --changed-only replay. The
+  // cached { text, fullText, toolCalls } is enough to REPLAY a single-turn
+  // dispatch fold too (re-derive the UI outcome for free). The one shape that
+  // can't be replayed from a single final output is conversation+dispatch
+  // (per-turn state), so that stays uncached. Record-on-pass; the passing
+  // attempt (not the last) keeps the replay verdict equal to live.
   const toCache = passingActual ?? lastActual;
-  const cacheable = ok && !cs.dispatch && toCache;
+  const cacheable = ok && toCache && !(cs.dispatch && inputs.mode === "conversation");
   return {
     ok,
     failures,
