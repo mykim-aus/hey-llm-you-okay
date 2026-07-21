@@ -53,7 +53,7 @@ import { itemFingerprint, itemKey, runAxisSpread, shortHash } from "../ledger.js
 import { produceLlm, resolveLlmInputs } from "./llm.js";
 import { InputContractError, checkInputContract } from "../inputs.js";
 import { caseKey } from "../baseline.js";
-import { fingerprintLlm, fingerprintWith, normalizeIgnore, unchangedSkipReason } from "../changed.js";
+import { fingerprintLlm, fingerprintWith, isCacheStale, normalizeIgnore, unchangedSkipReason } from "../changed.js";
 
 type FullRubric = RubricItem & { weight: number; ask: "scale" | "binary" };
 
@@ -296,7 +296,11 @@ export async function runJudgeCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResul
       promptFingerprint = { key, fp };
       if (ctx.changedOnly) {
         const reason = unchangedSkipReason(ctx.promptStore, key, fp, !!ctx.alwaysRun);
-        if (reason) return { ok: true, failures: [], skipped: reason, promptFingerprint, resolvedInputs: subjInputs };
+        // Skip only when unchanged AND fresh — a judge case whose last real run
+        // is older than maxCacheAgeDays re-runs to catch judge/provider drift.
+        const maxAgeDays = cs.maxCacheAgeDays ?? ctx.layer.maxCacheAgeDays ?? ctx.config.settings.changedOnly?.maxCacheAgeDays;
+        const stale = isCacheStale(ctx.promptStore?.cases[key]?.at, maxAgeDays, ctx.nowMs ?? Date.now());
+        if (reason && !stale) return { ok: true, failures: [], skipped: reason, promptFingerprint, resolvedInputs: subjInputs };
       }
     } catch {
       // resolution failure is surfaced by getSubjectOutput below with proper

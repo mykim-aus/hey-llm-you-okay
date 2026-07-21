@@ -31,6 +31,15 @@ export function printLayer(layer: LayerRunResult, verbose: boolean): void {
       console.log(`  ${MARK.skip} ${r.name} ${c.dim(`(${r.result.skipped})`)}`);
       continue;
     }
+    // A cached replay is a real ✓/✗ but from a stored output, not a live call —
+    // mark it so it is never read as a fresh pass.
+    if (r.result.cached) {
+      const mk = r.result.ok ? c.green("✓") : c.red("✗");
+      console.log(`  ${mk} ${r.name} ${c.cyan("⋯cached")} ${c.dim(`(${r.result.cached})`)}`);
+      for (const f of r.result.failures.slice(0, 6))
+        console.log(`      ${c.red("↳")} ${f.path ? c.dim(f.path + ": ") : ""}${f.message}`);
+      continue;
+    }
     // A verdict the judges could not reproduce is neither a pass nor a fail.
     if (r.result.inconclusive) {
       const a = r.result.agreement;
@@ -55,6 +64,9 @@ export function printLayer(layer: LayerRunResult, verbose: boolean): void {
     if (r.result.ok) {
       if (verbose) console.log(`  ${MARK.pass} ${r.name}${scoreTag} ${c.dim(ms(r.durationMs))}`);
       else console.log(`  ${MARK.pass} ${r.name}${scoreTag}`);
+      // --changed-only re-ran this despite the flag: a case that never matches
+      // its baseline is a non-deterministic payload burning tokens every run.
+      if (r.result.changedNote) console.log(c.yellow(`      ↻ ${r.result.changedNote}`));
     } else {
       console.log(`  ${MARK.fail} ${c.bold(r.name)}${scoreTag}`);
       for (const f of r.result.failures.slice(0, 6))
@@ -133,14 +145,21 @@ export function printSummary(summary: RunSummary, verbose = false): void {
   // 275-row backlog would print "275/275 PASS" having verified nothing — the
   // same lie, one level up from the case list.
   const skipped = summary.layers.reduce((s, l) => s + l.cases.filter((r) => r.result.skipped).length, 0);
+  // Cached replays ARE real verdicts (assertions ran on a stored output for an
+  // identical input), so they count toward pass/fail — but the count is shown
+  // so a run that was mostly replayed is not read as mostly fresh.
+  const cached = summary.layers.reduce((s, l) => s + l.cases.filter((r) => r.result.cached).length, 0);
   const passed = summary.layers.reduce(
     (s, l) => s + l.cases.filter((r) => r.result.ok && !r.result.skipped).length,
     0
   );
   const verdict = summary.ok ? c.green("PASS") : c.red("FAIL");
   const warn = summary.layers.filter((l) => !l.ok && !l.gate).length;
+  const notes =
+    (skipped ? c.yellow(` (${skipped} skipped, unverified)`) : "") +
+    (cached ? c.cyan(` (${cached} cached)`) : "");
   console.log(
-    `${c.bold("RESULT:")} ${verdict} — ${passed}/${total} cases${skipped ? c.yellow(` (${skipped} skipped, unverified)`) : ""}, ${summary.layers.length} layers${warn ? c.yellow(` (${warn} non-gated layer(s) failing)`) : ""} ${c.dim(ms(summary.durationMs))}${summary.profile ? c.dim(` [profile: ${summary.profile}]`) : ""}`
+    `${c.bold("RESULT:")} ${verdict} — ${passed}/${total} cases${notes}, ${summary.layers.length} layers${warn ? c.yellow(` (${warn} non-gated layer(s) failing)`) : ""} ${c.dim(ms(summary.durationMs))}${summary.profile ? c.dim(` [profile: ${summary.profile}]`) : ""}`
   );
 }
 

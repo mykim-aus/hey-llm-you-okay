@@ -45,6 +45,20 @@ export interface PromptRecord {
   fp: string;
   /** ISO time this case last ran (passed in by the caller — the runner clock) */
   at: string;
+  /** the last passing model OUTPUT for this exact payload. When --changed-only
+   *  finds the input unchanged, the assertions are re-run against THIS instead
+   *  of paying for a model call — so an unchanged case still reports a real
+   *  verdict (and a changed `expect:` is re-checked for free), rather than a
+   *  bare "skipped". Cached only for cases with no dispatch block (a dispatch
+   *  fold cannot be faithfully replayed from text alone). */
+  output?: CachedOutput;
+}
+
+export interface CachedOutput {
+  text: string;
+  fullText: string;
+  /** tool calls with args, so toolCalled/toolArgs replay exactly */
+  toolCalls: { id?: string; name: string; args: Record<string, unknown> }[];
 }
 
 export interface PromptStore {
@@ -81,7 +95,12 @@ function applyIgnore(text: string, ignore?: string[]): string {
   for (const p of ignore) {
     let re: RegExp;
     try {
-      re = new RegExp(p, "g");
+      // `gm`, not `g`: a prompt is multi-line and the natural way to ignore a
+      // volatile line is `^TS: .*$`. Without the `m` flag, `^`/`$` anchor to the
+      // whole string, so a line in the MIDDLE never matches and the ignore
+      // silently does nothing — the fingerprint keeps moving and the user cannot
+      // tell why. Line-oriented patterns are the whole use case, so `m` is on.
+      re = new RegExp(p, "gm");
     } catch (e: any) {
       throw new Error(`invalid fingerprintIgnore pattern ${JSON.stringify(p)}: ${e.message}`);
     }
@@ -160,5 +179,35 @@ export function unchangedSkipReason(
   if (!store || alwaysRun) return null;
   const prev = store.cases[key];
   if (prev && prev.fp === fp) return `unchanged — payload identical since ${prev.at}`;
+  return null;
+}
+
+/**
+ * Why a case RAN under --changed-only (it was not skipped). Only interesting
+ * when a baseline existed and the payload DIFFERS from it: that case will re-run
+ * every time, silently defeating the cost saving. If the user did not edit the
+ * prompt, that is a non-deterministic payload (random review words, a
+ * timestamp, a session recap) — which also blocks triage's byte-identical
+ * fast-path — and the fix is `fingerprintIgnore`. Returns null for the ordinary
+ * "no baseline yet" first run (nothing to warn about).
+ */
+/**
+ * Whether a cache entry is too OLD to trust, given a max age in days. The input
+ * has not changed, but the provider might have — so past this age --changed-only
+ * re-verifies against the live model instead of replaying. Returns false when no
+ * age limit is set (cache never expires on age) or the timestamp is unparseable
+ * (fail toward re-running, never toward trusting a bad timestamp).
+ */
+export function isCacheStale(at: string | undefined, maxAgeDays: number | undefined, nowMs: number): boolean {
+  if (!maxAgeDays || maxAgeDays <= 0) return false;
+  const t = at ? Date.parse(at) : NaN;
+  if (!Number.isFinite(t)) return true;
+  return nowMs - t > maxAgeDays * 86_400_000;
+}
+
+export function changedRunReason(store: PromptStore | undefined, key: string, fp: string): string | null {
+  const prev = store?.cases[key];
+  if (prev && prev.fp !== fp)
+    return `payload changed since ${prev.at} — if you did not edit it, the inputs are non-deterministic (random/timestamped content); add fingerprintIgnore so --changed-only and triage can compare it`;
   return null;
 }

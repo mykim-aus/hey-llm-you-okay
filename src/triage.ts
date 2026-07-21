@@ -41,6 +41,7 @@ import type {
   TriageReport,
 } from "./types.js";
 import { extractJson } from "./util.js";
+import { fingerprintLlm, normalizeIgnore } from "./changed.js";
 
 const pExecFile = promisify(execFile);
 
@@ -263,6 +264,11 @@ export async function triageFailures(
     // A broken file:/exec: ref must degrade to one report, never abort the run
     // (the summary and CI report would be lost).
     const defForInputs = layer.kind === "llm" ? record.def : record.def.input;
+    // Same ignore list --changed-only uses, so a case made comparable there
+    // (random review words, a timestamp) is comparable HERE too. Without this,
+    // fingerprintIgnore silently did nothing for triage: the byte-identical
+    // fast-path never fired and every drift check paid for a full B-arm.
+    const ignore = normalizeIgnore(record.def.fingerprintIgnore ?? (layer as any).fingerprintIgnore);
     let currentInputs;
     try {
       currentInputs = await resolveLlmInputs(defForInputs, ctx);
@@ -288,8 +294,14 @@ export async function triageFailures(
     const snap = baseline.snapshots[key];
 
     // diff shortcut — inputs IDENTICAL to the last-passing snapshot mean the
-    // failure cannot be "your change"; skip the B arm entirely (zero extra cost)
-    if (snap && JSON.stringify(snap.inputs) === JSON.stringify(currentInputs)) {
+    // failure cannot be "your change"; skip the B arm entirely (zero extra cost).
+    // Compared through the fingerprint (with fingerprintIgnore applied) rather
+    // than a raw JSON compare, so a non-deterministic-but-ignored payload still
+    // takes the fast-path — matching --changed-only's notion of "unchanged".
+    const sameInputs =
+      snap &&
+      fingerprintLlm(snap.inputs, undefined, ignore) === fingerprintLlm(currentInputs, undefined, ignore);
+    if (sameInputs) {
       // Strongest drift signal (inputs literally identical → cannot be your
       // change), but the current arm can still be a noisy 1/3 rather than a
       // clean 0/3. Confidence tracks the current arm's unanimity and sample size.

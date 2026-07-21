@@ -126,12 +126,18 @@ export async function loadConfig(
       if (l.inputs.system !== undefined && !INPUTS_SYSTEM_MODES.includes(l.inputs.system))
         err(`${at}.inputs.system: ${suggest(l.inputs.system, INPUTS_SYSTEM_MODES)}`);
     }
+    if (l.maxCacheAgeDays !== undefined && (typeof l.maxCacheAgeDays !== "number" || !(l.maxCacheAgeDays > 0)))
+      err(`${at}.maxCacheAgeDays: must be a positive number of days`);
     const gate = l.gate !== undefined ? !!l.gate : !["llm", "judge"].includes(l.kind);
     return { ...l, gate } as LayerConfig;
   });
 
   const baseDir = path.dirname(file);
   const settings = isPlainObject(d.settings) ? (d.settings as any) : {};
+
+  const globalMaxAge = settings.changedOnly?.maxCacheAgeDays;
+  if (globalMaxAge !== undefined && (typeof globalMaxAge !== "number" || !(globalMaxAge > 0)))
+    err(`${file}: settings.changedOnly.maxCacheAgeDays must be a positive number of days`);
 
   // settings.envFile — load API keys from a local .env so `heyllm run` works
   // without manual exports. Real env vars always win (CI secrets are safe).
@@ -216,7 +222,7 @@ export async function loadLayerCases(
 // `input`/`context` by judge, `note`/`capturedAt` are already here — a flat
 // id/url would collide the moment a new kind wants those names. One nested key
 // verified absent from every KIND_KEYS list costs a single COMMON entry.
-const COMMON_KEYS = ["name", "tags", "skip", "note", "capturedAt", "expect", "source", "fingerprintIgnore"];
+const COMMON_KEYS = ["name", "tags", "skip", "note", "capturedAt", "expect", "source", "fingerprintIgnore", "maxCacheAgeDays"];
 // The file-mode static keys — mutually exclusive with `compare:`.
 const STATIC_FILE_KEYS = ["file", "files", "mustExist", "forbid", "require", "jsonValid", "yamlValid", "maxBytes"];
 

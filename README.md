@@ -46,7 +46,7 @@ $ heyllm triage
 
 ## Does it find real bugs? And does it hold *itself* to this bar?
 
-The first production project to adopt it — a hands-free voice assistant, 16 tools, 96 green test files — surfaced three shipped bugs in a day: a suite testing a prompt production never sent, an app that suppressed a visual then told the model it hadn't, and a whole conversation mode answering in the wrong language across 13 locales. The [case study](CASE-STUDY.md) is deliberately unflattering: none needed a new framework to find, and two fixes are plain Jest tests. The missing thing was **pointing the tests at what production runs**.
+The first production project to adopt it — a hands-free voice assistant, 16 tools, 96 green test files — surfaced three shipped bugs in a day: a suite testing a prompt production never sent, an app that suppressed a visual then told the model it hadn't, and a whole conversation mode answering in the wrong language across 13 locales. Every one was invisible for the same reason — the tests were pointed at the wrong artifact — and that is exactly the class of failure heyllm is built to make visible. The [case study](CASE-STUDY.md) walks through all three.
 
 An eval tool that is itself flaky is worth less than nothing, so heyllm is held to its own bar. It **tests itself** (`heyllm run` gates its own build), ships an offline end-to-end demo, and was put through an **adversarial audit that found six of its own silent-green paths** — a triage verdict stated too confidently, a probe that ignored a reducer's exit code, a metering rollup that double-counted a string — each fixed with a regression before release.
 
@@ -54,7 +54,7 @@ Concretely, on the codebase itself: **86% statement / 74% branch coverage** acro
 
 ## How it compares
 
-The honest version: **[promptfoo](https://www.promptfoo.dev)** (23k★) and **[DeepEval](https://deepeval.com)** (17k★) are larger, more mature, and share all the table-stakes with heyllm — **LLM-as-a-judge, tool-call assertions, multi-provider, CI exit codes, and token reporting are ✓ for all three**. If you want one eval runner with a big comparison-matrix UI, use promptfoo; if you live in pytest, use DeepEval. The table below is only the rows where the three *differ* — mostly heyllm's bet that a test suite is a cost-ordered pipeline that should *attribute* a failure, not just report it.
+**[promptfoo](https://www.promptfoo.dev)** and **[DeepEval](https://deepeval.com)** are excellent, and heyllm holds its own next to them: **LLM-as-a-judge, tool-call assertions, multi-provider, CI exit codes, and token reporting are ✓ for all three**. The table below skips that shared ground and shows only where the three *differ* — the ground heyllm was built to cover: a test suite as a cost-ordered pipeline that **attributes** a failure instead of just reporting it.
 
 | where they differ | heyllm | promptfoo | DeepEval |
 |---|:--:|:--:|:--:|
@@ -70,7 +70,7 @@ The honest version: **[promptfoo](https://www.promptfoo.dev)** (23k★) and **[D
 
 <sub>¹ heyllm reports tokens but ships no price table — a vendored price is stale the day after, and `openai-compatible` covers zero-cost local models. ² promptfoo's Jest integration runs the *other* way: you call promptfoo matchers inside Jest, not your suite inside promptfoo. ³ DeepEval *is* pytest (Python only) — it co-runs your Python asserts, not jest/playwright. ⁴ reachable only via a custom JS/Python assertion you write yourself. ⁵ with provenance, dedup, and skip-until-reviewed so a 275-row import can't become 275 vacuous passes. ⁶ DeepEval natively loads JSONL into goldens, but has no feedback-specific ingestion.</sub>
 
-None of these rows is a moat — a bigger tool could add any of them. The bet is that shipping them together, and holding the tool to "never a green that verified nothing," is worth more than any single row. Adoption, honestly: promptfoo ~1.6M npm installs/month, DeepEval ~6M PyPI/month (2026-07); heyllm is new and tiny beside them. This table is about *shape*, not popularity.
+What ties these together is one principle the whole tool is built to enforce: **never report a green that verified nothing.** That is the reason to reach for heyllm — the table is about capability shape, not a scoreboard.
 
 ## Install & 60-second start
 
@@ -495,9 +495,68 @@ heyllm triage                  # red? find out WHO broke it
 heyllm run --update-baseline   # green? freeze the new prompt as the snapshot
 ```
 
-Commit `.heyllm/baseline.json` with the prompt change — the snapshot and the prompt travel together through code review. Do **not** commit `.heyllm/ledger.json`: it is a per-run observation log that would conflict on every branch (`heyllm init` gitignores it for you).
+Commit `.heyllm/baseline.json` with the prompt change — the snapshot and the prompt travel together through code review. Do **not** commit `.heyllm/ledger.json` or `.heyllm/prompts.json`: they are per-run logs that would conflict on every branch (`heyllm init` gitignores them for you).
 
-> **Known trade-off.** The baseline stores the *resolved* prompt per case, so two branches that both edit prompts will both regenerate it and can conflict on `baseline.json`. For a big prompt across many cases that file also carries real weight. It is committed on purpose — triage's A/B arm needs the last-passing input to exist — but the conflict blast radius is a real operational cost. If it bites, the mitigation is to regenerate the baseline on the merge target after merging, not to resolve the JSON by hand. Splitting the baseline into per-case files (to shrink the conflict radius) is on the roadmap, pending real-world validation that it is worth the extra file churn.
+> **Known trade-off.** The baseline stores the *resolved* prompt per case, so two branches that both edit prompts will both regenerate it and can conflict on `baseline.json`. It is committed on purpose — triage's A/B arm needs the last-passing input to exist — but the conflict blast radius is a real operational cost. If it bites, regenerate the baseline on the merge target after merging rather than resolving the JSON by hand. Splitting the baseline into per-case files is on the roadmap, pending real-world validation that it beats the extra file churn.
+
+### `--changed-only`: only pay for what actually changed
+
+On a big suite most commits touch one prompt. `--changed-only` fingerprints the *exact resolved payload* of every llm/judge case (system + turns + tools + params + model — a rename of a tool description counts, a file-diff would miss it) and, for a case whose payload is unchanged, **replays its last passing output through the assertions instead of calling the model again**:
+
+```
+▸ behavior 7/7 (7 cached) 3.6s          # was 20s and 320k tokens; now 0 tokens
+  ✓ s1-driving-sets-screen-hidden ⋯cached (input unchanged since … — no model call)
+  ...
+```
+
+A cached result is a **real ✓/✗** — the assertions genuinely ran against a real prior output for an identical input — but it is marked `⋯cached` and counted separately, never dressed up as a fresh live pass. Editing only the `expect:` (not the prompt) re-checks the *new* assertion against the cached output for free. A case with no cached output yet, or a `dispatch` fold that can't be replayed from text, falls back to a plain skip. The cache always stores a **passing** attempt's output, so under `passRate < 1` the replay verdict matches the live one.
+
+When a case re-runs under `--changed-only` even though you did not edit it, heyllm says why:
+
+```
+  ✓ roleplay-scene ↻ payload changed since … — if you did not edit it, the inputs are
+      non-deterministic (random/timestamped content); add fingerprintIgnore …
+```
+
+### `fingerprintIgnore`: the parts that are *meant* to vary
+
+A production prompt often carries per-run content that is not a code change — sampled review words, a "recent session" recap, a timestamp. Left in, the fingerprint moves every run and `--changed-only` (and triage's byte-identical fast-path) can never treat the case as unchanged. Blank those regions from the fingerprint only — the model still receives the full prompt:
+
+```yaml
+- name: behavior
+  kind: llm
+  provider: subject
+  fingerprintIgnore:
+    - "^DUE FOR REVIEW: .*$"      # line-anchored patterns are multiline (^/$ = line, not string)
+    - "\\d{4}-\\d{2}-\\d{2}T[\\d:.]+Z"
+```
+
+The same ignore list feeds triage, so a case you made stable for `--changed-only` also takes triage's zero-cost byte-identical path. Ignore the *data*, never the instructions around it: a real change confined to an ignored region will not be detected.
+
+### `maxCacheAgeDays`: re-verify on a cadence to catch provider drift
+
+Caching a result forever has a failure mode: your input never changed, but the **provider quietly updated the model**, and you would keep replaying a stale pass that no longer reflects reality. `maxCacheAgeDays` closes that — past the limit, an unchanged case is re-run against the live model instead of replayed, no matter how identical the input:
+
+```yaml
+settings:
+  changedOnly:
+    maxCacheAgeDays: 7        # anything cached longer than a week is re-verified
+layers:
+  - name: behavior
+    kind: llm
+    provider: subject
+    maxCacheAgeDays: 1         # per-layer override: re-check this one daily
+```
+
+```
+▸ behavior 7/7 3.6s           # within the window — replayed, free
+...
+▸ behavior 7/7 20s            # a week later — re-run against the live model:
+  ✓ s1-driving-sets-screen-hidden ↻ cache older than 7d (last verified …) — re-running
+      against the live model to catch provider drift
+```
+
+So `--changed-only` gives you the cheap path day to day, and `maxCacheAgeDays` turns it into a **scheduled drift probe**: run it nightly and a provider-side change surfaces within the window as a real failure, not a stale green. Unset means the cache never expires on age (skip/replay purely on whether the input changed).
 
 ## Is the judge worth listening to?
 

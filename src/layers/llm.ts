@@ -29,7 +29,7 @@ import { ProviderError, callProvider, deepGet, interpolateDeep, resolveRef } fro
 import { checkInputContract } from "../inputs.js";
 import { runDispatchBlock } from "./dispatch.js";
 import { caseKey } from "../baseline.js";
-import { fingerprintLlm, normalizeIgnore, unchangedSkipReason } from "../changed.js";
+import { changedRunReason, fingerprintLlm, isCacheStale, normalizeIgnore, unchangedSkipReason } from "../changed.js";
 
 const toArr = (v: unknown): string[] => (v === undefined ? [] : Array.isArray(v) ? v : [v as string]);
 
@@ -167,13 +167,17 @@ export interface LlmActual {
   toolNames: string[];
 }
 
+function safeJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
 function buildActual(turn: TurnOutcome): LlmActual {
   const text = turn.lastText || turn.text;
-  let json: unknown;
-  try {
-    json = JSON.parse(text);
-  } catch {}
-  return { text, fullText: turn.text, json, toolCalls: turn.toolCalls, toolNames: turn.toolCalls.map((c) => c.name) };
+  return { text, fullText: turn.text, json: safeJson(text), toolCalls: turn.toolCalls, toolNames: turn.toolCalls.map((c) => c.name) };
 }
 
 /** llm-specific expect keys first, then generic assert.js keys. */
@@ -339,9 +343,49 @@ export async function runLlmCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult>
   const fp = fingerprintLlm(inputs, model, ignore);
   const key = caseKey(ctx.layer.name, cs.name);
   const promptFingerprint = { key, fp };
-  if (ctx.changedOnly) {
-    const reason = unchangedSkipReason(ctx.promptStore, key, fp, !!ctx.alwaysRun);
-    if (reason) return { ok: true, failures: [], skipped: reason, promptFingerprint, resolvedInputs: inputs };
+  let changedNote: string | undefined;
+  if (ctx.changedOnly && !ctx.alwaysRun) {
+    const prev = ctx.promptStore?.cases[key];
+    const maxAgeDays = cs.maxCacheAgeDays ?? ctx.layer.maxCacheAgeDays ?? ctx.config.settings.changedOnly?.maxCacheAgeDays;
+    const stale = prev && isCacheStale(prev.at, maxAgeDays, ctx.nowMs ?? Date.now());
+    if (prev && prev.fp === fp && stale) {
+      // Input unchanged, but the cache is older than maxCacheAgeDays — the
+      // provider may have drifted since. Fall through to a real model call to
+      // re-verify, and say why (this is the periodic drift check).
+      changedNote = `cache older than ${maxAgeDays}d (last verified ${prev.at}) — re-running against the live model to catch provider drift`;
+    } else if (prev && prev.fp === fp) {
+      // Input unchanged and fresh. Rather than skip (and report nothing), REPLAY the
+      // cached model output through the assertions — a real verdict at zero
+      // API cost. This also re-checks a changed `expect:` (which is not part of
+      // the fingerprint) against the same output for free. Only when the output
+      // was cached and there is no dispatch fold to reproduce; otherwise skip.
+      if (prev.output && !cs.dispatch) {
+        const cachedActual: LlmActual = {
+          text: prev.output.text,
+          fullText: prev.output.fullText,
+          json: safeJson(prev.output.text),
+          toolCalls: prev.output.toolCalls,
+          toolNames: prev.output.toolCalls.map((c) => c.name),
+        };
+        const failures: Failure[] = [];
+        checkLlmExpect(cs.expect, cachedActual, failures);
+        return {
+          ok: !failures.length,
+          failures,
+          cached: `input unchanged since ${prev.at} — replayed the cached output (no model call)`,
+          detail: { attempts: 0, cached: true, toolNames: cachedActual.toolNames },
+          resolvedInputs: inputs,
+          // do NOT re-emit promptFingerprint: a cached replay must not overwrite
+          // the stored output (it would re-timestamp without a fresh run).
+        };
+      }
+      return { ok: true, failures: [], skipped: `unchanged — payload identical since ${prev.at}`, promptFingerprint, resolvedInputs: inputs };
+    }
+    // Not skipped: if a baseline existed and the payload differs, say why — a
+    // case that re-runs every time is a non-deterministic payload defeating the
+    // saving, and the user cannot see that without being told. (Skipped when a
+    // stale-cache note was already set above.)
+    if (!changedNote) changedNote = changedRunReason(ctx.promptStore, key, fp) ?? undefined;
   }
 
   const repeat = cs.repeat ?? ctx.layer.repeat ?? 1;
@@ -351,12 +395,21 @@ export async function runLlmCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult>
   const attempts: AttemptResult[] = [];
   let dispatchState: unknown;
   let dispatchEffects: unknown[] | undefined;
+  // The output cached for a --changed-only replay must be a PASSING attempt's
+  // output — under passRate < 1 the case can pass while its LAST attempt failed,
+  // and caching that last attempt would make the replay disagree with the live
+  // verdict. Prefer the first clean attempt; fall back to the last only if none
+  // passed (in which case the case fails and nothing gets cached anyway).
+  let passingActual: LlmActual | undefined;
+  let lastActual: LlmActual | undefined;
   for (let i = 0; i < repeat; i++) {
     const failures: Failure[] = [];
     try {
       const out = await produceLlm(provider, inputs, { maxRounds, perTurnFailures: failures });
       const actual = buildActual(out);
+      lastActual = actual;
       checkLlmExpect(cs.expect, actual, failures);
+      if (!failures.length && !passingActual) passingActual = actual;
       // the chain does not end at the model: fold its calls through the app's
       // reducer and assert the state the user would actually have seen
       if (cs.dispatch) {
@@ -399,13 +452,22 @@ export async function runLlmCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult>
       });
     failures.push(...(attempts.find((a) => !a.ok && !(a.failures || []).some((f) => f.infra))?.failures || []));
   }
+  // Cache a PASSING attempt's output for a future --changed-only replay — only
+  // for a dispatch-free case (a fold cannot be reproduced from text) and only
+  // when the case passed (record-on-pass mirrors the fingerprint policy). Using
+  // the passing attempt, not the last, keeps the replay verdict equal to live.
+  const toCache = passingActual ?? lastActual;
+  const cacheable = ok && !cs.dispatch && toCache;
   return {
     ok,
     failures,
+    ...(changedNote ? { changedNote } : {}),
     detail: { attempts: attempts.length, passed, toolNames: attempts.at(-1)?.toolNames },
     ...(cs.dispatch ? { dispatchState, dispatchEffects } : {}),
     resolvedInputs: inputs, // triage snapshots exactly what was sent
     attemptsDetail: attempts,
-    promptFingerprint, // runner records this into the changed-only store
+    promptFingerprint: cacheable
+      ? { ...promptFingerprint, output: { text: toCache!.text, fullText: toCache!.fullText, toolCalls: toCache!.toolCalls } }
+      : promptFingerprint,
   };
 }

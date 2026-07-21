@@ -180,3 +180,52 @@ layers:
   assert.equal(r.ok, false);
   assert.ok(r.failures.some((f) => f.path === "baseline"), JSON.stringify(r.failures));
 });
+
+test("triage byte-identical fast-path honors fingerprintIgnore (coherent with --changed-only)", async () => {
+  // A payload with a volatile line (a timestamp) that fingerprintIgnore excludes.
+  // The raw inputs differ run-to-run, but the fingerprint is stable — so triage
+  // must still take the zero-cost byte-identical fast-path, exactly as
+  // --changed-only would skip it. Before the fix, triage's raw JSON compare
+  // missed this and paid for a full B-arm every time.
+  const dir = await mkdtemp(path.join(tmpdir(), "heyllm-triage-fp-"));
+  await mkdir(path.join(dir, "tests"), { recursive: true });
+  await mkdir(path.join(dir, "prompts"), { recursive: true });
+  const cfg = `
+providers:
+  m: { kind: openai-compatible, baseUrl: "${mock.base}/v1", model: mock-1 }
+settings:
+  triage: { repeat: 3 }
+layers:
+  - name: b
+    kind: llm
+    provider: m
+    gate: false
+    include: tests/*.yaml
+`;
+  await writeFile(path.join(dir, "heyllm.yaml"), cfg);
+  await writeFile(
+    path.join(dir, "tests/cases.yaml"),
+    `cases:
+  - name: says-magic
+    system: file:../prompts/sys.txt
+    prompt: "say the word"
+    fingerprintIgnore: ["^TS: .*$"]
+    expect: { text: { $contains: "MAGIC" } }
+`
+  );
+  await writeFile(path.join(dir, "prompts/sys.txt"), "SAY: MAGIC\nTS: 2026-07-21T00:00:00Z\n");
+  await run(dir, { updateBaseline: true });
+
+  // change ONLY the ignored line, and drift the model
+  await writeFile(path.join(dir, "prompts/sys.txt"), "SAY: MAGIC\nTS: 2026-07-21T09:99:99Z\n");
+  await mock.setDrift(true);
+  try {
+    const red = await run(dir, { triage: true });
+    const t = red.triage.find((t) => t.caseName === "says-magic");
+    assert.equal(t.verdict, "model-drift", JSON.stringify(t));
+    assert.equal(t.arms.length, 1, "fast-path taken: the ignored-only change did NOT trigger a paid B-arm");
+    assert.match(t.reason, /byte-identical/);
+  } finally {
+    await mock.setDrift(false);
+  }
+});

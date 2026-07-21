@@ -130,6 +130,7 @@ export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Pro
       changedOnly: opts.changedOnly,
       alwaysRun: alwaysSet.has(layer.name),
       promptStore,
+      nowMs: startedAt.getTime(), // one clock per run for cache-age checks
     };
   };
 
@@ -231,10 +232,13 @@ export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Pro
         // "unchanged" on the next --changed-only run — a broken test must keep
         // re-running until it is green. A skipped-unchanged case (result.skipped)
         // did not run, so its stored timestamp is left untouched.
-        if (result.promptFingerprint && result.ok && !result.skipped) {
+        if (result.promptFingerprint && result.ok && !result.skipped && !result.cached) {
           promptStore.cases[result.promptFingerprint.key] = {
             fp: result.promptFingerprint.fp,
             at: startedAt.toISOString(),
+            // carry the output so a future --changed-only run can replay the
+            // assertions against it instead of paying for a model call
+            ...(result.promptFingerprint.output ? { output: result.promptFingerprint.output } : {}),
           };
           promptStoreDirty = true;
         }

@@ -141,6 +141,15 @@ export function startMockLLM() {
           return reply(n === 1 ? "NOPE" : "MAGIC");
         }
 
+        // PASSFIRST: attempt 1 passes ("MAGIC"), later attempts fail ("NOPE").
+        // Under passRate < 1 the CASE passes, but the LAST attempt failed — the
+        // exact shape that must cache the passing attempt, not the last.
+        if (lastUser.includes("PASSFIRST")) {
+          const n = (state.counters.get("pf:" + lastUser) || 0) + 1;
+          state.counters.set("pf:" + lastUser, n);
+          return reply(n === 1 ? "MAGIC" : "NOPE");
+        }
+
         const m = sys.match(/SAY:\s*(\S+)/);
         return reply(m ? m[1] : `echo: ${lastUser}`);
       }

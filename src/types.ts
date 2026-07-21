@@ -236,6 +236,9 @@ export interface LayerConfig {
   /** enable score-regression checks against the baseline file */
   baseline?: boolean;
   maxDrop?: number;
+  /** --changed-only: re-verify against the live model when the cache is older
+   *  than this many days (overrides settings.changedOnly.maxCacheAgeDays) */
+  maxCacheAgeDays?: number;
   /** llm/judge — contract on where each case's system prompt must come from */
   inputs?: InputsContract;
 }
@@ -272,6 +275,17 @@ export interface Settings {
   capture?: CaptureSettings;
   /** .env file(s) to load before running; real env vars always win */
   envFile?: string | string[];
+  changedOnly?: ChangedOnlySettings;
+}
+
+export interface ChangedOnlySettings {
+  /** Force a real model call (no cache replay / no skip) when a case's last
+   *  actual run is older than this many days, even if the payload is unchanged.
+   *  This is how caching stays honest: the input has not changed, but the
+   *  PROVIDER might have, so re-verify on a cadence to catch model drift. A
+   *  layer may override with its own `maxCacheAgeDays`. Unset = cache never
+   *  expires on age. */
+  maxCacheAgeDays?: number;
 }
 
 export interface HeyLLMConfig {
@@ -351,6 +365,14 @@ export interface CaseResult {
   ok: boolean;
   failures: Failure[];
   skipped?: string;
+  /** --changed-only: why this case RE-RAN despite the flag (payload changed vs
+   *  its baseline). Surfaced so a case that re-runs every time — a
+   *  non-deterministic payload silently defeating the cost saving — is visible. */
+  changedNote?: string;
+  /** --changed-only: set when the verdict came from REPLAYING the cached output
+   *  (input unchanged) instead of a fresh model call. A real verdict, but not a
+   *  fresh one — labelled so it is never mistaken for a live pass. */
+  cached?: string;
   detail?: Record<string, unknown>;
   /** judge layer */
   score?: number;
@@ -376,7 +398,7 @@ export interface CaseResult {
   attemptsDetail?: AttemptResult[];
   /** llm/judge — fingerprint of the resolved payload, for --changed-only. The
    *  runner records this into the prompt store when the case actually ran. */
-  promptFingerprint?: { key: string; fp: string };
+  promptFingerprint?: { key: string; fp: string; output?: CachedOutput };
 }
 
 export interface CaseCtx {
@@ -397,6 +419,9 @@ export interface CaseCtx {
   alwaysRun?: boolean;
   /** previous-run payload fingerprints, loaded once per run by the runner */
   promptStore?: PromptStore;
+  /** the run's start time (ms) — the clock for cache-age (maxCacheAgeDays)
+   *  checks, passed in so staleness is deterministic across a run and testable */
+  nowMs?: number;
 }
 
 export interface CaseRunRecord {
@@ -483,7 +508,7 @@ export interface TriageReport {
 }
 
 import type { LedgerFile, LedgerObservation } from "./ledger.js";
-import type { PromptStore } from "./changed.js";
+import type { CachedOutput, PromptStore } from "./changed.js";
 
 // ── baseline / snapshot store ─────────────────────────────────────
 export interface SnapshotEntry {
