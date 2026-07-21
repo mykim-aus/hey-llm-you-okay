@@ -249,6 +249,15 @@ export interface LayerConfig {
 export interface InputsContract {
   /** required = any non-empty · file = file:/exec: ref · exec = exec: ref only */
   system?: "required" | "file" | "exec";
+  /** substrings the RESOLVED system prompt must contain — a content-completeness
+   *  check for assembled prompts. Motivating incident (2026-07-21): a prompt
+   *  builder whose DB was unreachable silently emitted a prompt missing its
+   *  entire case-list section (17% of the text), exit 0, and the layer stayed
+   *  green — testing a degraded prompt production never sends. A size floor was
+   *  deliberately rejected for this (size was never the signal); naming one
+   *  distinctive marker per assembled section is. Checked per case, before any
+   *  paid call. */
+  mustContain?: string[];
 }
 
 export interface TriageSettings {
@@ -286,6 +295,14 @@ export interface ChangedOnlySettings {
    *  layer may override with its own `maxCacheAgeDays`. Unset = cache never
    *  expires on age. */
   maxCacheAgeDays?: number;
+  /** Set false to store FINGERPRINTS ONLY — no model outputs on disk. For
+   *  projects whose prompts carry user data (a learner's memory, review words,
+   *  session recaps), the cached output is that data verbatim: it must never be
+   *  committed, uploaded as a CI artifact, or otherwise leave the machine.
+   *  fp-only trades the cached-replay verdict for a plain "unchanged" skip —
+   *  --changed-only still saves the API call, it just cannot re-judge for free.
+   *  Default true (outputs cached). */
+  cacheOutputs?: boolean;
 }
 
 export interface HeyLLMConfig {

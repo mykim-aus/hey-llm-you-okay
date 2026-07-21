@@ -102,6 +102,19 @@ export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Pro
   // is set) so the flag has a baseline to compare against next time.
   const promptStore = await loadPromptStore(config.baseDir);
   let promptStoreDirty = false;
+  // cacheOutputs: false is retroactive — outputs cached BEFORE the setting was
+  // added are the same user data and must not keep sitting on disk. Scrubbing at
+  // load (and persisting the scrub) also disarms the replay path for this run,
+  // since replay only fires when a stored output exists.
+  if (config.settings.changedOnly?.cacheOutputs === false) {
+    let scrubbed = 0;
+    for (const rec of Object.values(promptStore.cases))
+      if (rec.output) {
+        delete rec.output;
+        scrubbed++;
+      }
+    if (scrubbed) promptStoreDirty = true;
+  }
   const alwaysSet = new Set(opts.always || []);
   const maxDrop = config.settings.maxDrop ?? 1;
   let gateBroken = false;
@@ -233,12 +246,19 @@ export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Pro
         // re-running until it is green. A skipped-unchanged case (result.skipped)
         // did not run, so its stored timestamp is left untouched.
         if (result.promptFingerprint && result.ok && !result.skipped && !result.cached) {
+          // settings.changedOnly.cacheOutputs: false → fingerprints only. The
+          // cached output IS the user data the prompt carried (verbatim model
+          // reply about this learner) — privacy-sensitive projects opt out of
+          // persisting it and accept skip-instead-of-replay.
+          const keepOutput = config.settings.changedOnly?.cacheOutputs !== false;
           promptStore.cases[result.promptFingerprint.key] = {
             fp: result.promptFingerprint.fp,
             at: startedAt.toISOString(),
             // carry the output so a future --changed-only run can replay the
             // assertions against it instead of paying for a model call
-            ...(result.promptFingerprint.output ? { output: result.promptFingerprint.output } : {}),
+            ...(keepOutput && result.promptFingerprint.output
+              ? { output: result.promptFingerprint.output }
+              : {}),
           };
           promptStoreDirty = true;
         }

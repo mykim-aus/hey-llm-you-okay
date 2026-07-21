@@ -114,13 +114,18 @@ export function lintInputsContract(layer: LayerConfig, cs: CaseDef, at: string):
 }
 
 /**
- * Run-time check on the RESOLVED inputs. Two rules, deliberately different in
- * scope, neither subsuming the other:
+ * Run-time check on the RESOLVED inputs. Three rules, deliberately different in
+ * scope, none subsuming another:
  *   Rule 1 (unconditional): a file:/exec: system ref that resolved to empty ran
  *           the case with NO system prompt while declaring one.
  *   Rule 2 (only when the layer declares a contract): re-enforces the mode from
  *           provenance, so the contract fires on `heyllm run` — which never
  *           calls the validator.
+ *   Rule 3 (only when the layer declares inputs.mustContain): the resolved
+ *           system must contain each named marker. Catches a builder that
+ *           SUCCEEDS but emits a degraded prompt — measured: a dead DB cost a
+ *           prompt its whole case-list section at exit 0, and the 0-byte floor
+ *           (rule 1) could not see it because 54k bytes came back.
  */
 export function checkInputContract(cs: CaseDef, inputs: ResolvedLlmInputs, layer: LayerConfig): Failure[] {
   if (isJudgeExempt(cs, layer.kind)) return [];
@@ -144,6 +149,22 @@ export function checkInputContract(cs: CaseDef, inputs: ResolvedLlmInputs, layer
       path: "inputs.system",
       message: `layer '${layer.name}' declares inputs.system: ${mode}, but this case's system prompt is ${source === "absent" ? "absent" : `an ${source} value`}. ${fixHint(mode as InputsSystemMode)}`,
     });
+
+  // Rule 3 — content completeness. A ref that resolves non-empty can still be
+  // a prompt production never sends (builder degraded: DB down, feature-flagged
+  // section, partial assembly). Substring, not regex: the marker is meant to be
+  // a verbatim quote from the prompt, and regex escaping errors here would fail
+  // toward "always matches" — the silent-green direction.
+  const markers = layer.inputs?.mustContain;
+  if (markers?.length) {
+    const sys = inputs.system ?? "";
+    for (const m of markers)
+      if (!sys.includes(m))
+        fails.push({
+          path: "inputs.mustContain",
+          message: `resolved system prompt is missing the declared marker ${JSON.stringify(m)} (${sys.length} chars came back). The builder succeeded but emitted a DEGRADED prompt — a section production assembles is absent, so running this case would test a program you do not ship.`,
+        });
+  }
 
   return fails;
 }

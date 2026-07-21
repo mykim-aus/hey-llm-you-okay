@@ -550,6 +550,11 @@ export async function main(argv: string[]): Promise<number> {
     console.log(`heyllm ${version()}`);
     return 0;
   }
+  // `--help` must NEVER fall through to the subcommand. `heyllm run --help`
+  // used to start a real run — in a project whose default pyramid includes
+  // paid llm/judge layers, asking for help kicked off live model calls
+  // (measured 2026-07-21: `run --help` executed the suite). Help is read-only.
+  if (parsed.flags.help) return help();
   if (parsed.flags["no-color"]) process.env.NO_COLOR = "1";
   try {
     switch (parsed.cmd) {

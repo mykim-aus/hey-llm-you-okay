@@ -555,3 +555,75 @@ layers:
   assert.equal(code, 2);
   assert.match(out, /nothing was measured/);
 });
+
+test("`run --help` prints help and NEVER executes the suite", async () => {
+  // Measured 2026-07-21: `heyllm run --help` fell through to cmdRun and ran the
+  // whole pyramid — in a project whose default layers include paid llm/judge
+  // calls, asking for help started a live billed run. A canary case writes a
+  // file; if the file exists after --help, the suite executed.
+  const dir = await scaffold({
+    "heyllm.yaml": `
+layers:
+  - name: canary
+    kind: exec
+    cases:
+      - { name: proof, command: "echo EXECUTED > ran.txt" }
+`,
+  });
+  for (const cmd of [["run", "--help"], ["triage", "--help"]]) {
+    const out = execFileSync("node", [CLI, ...cmd], { cwd: dir, stdio: "pipe" }).toString();
+    assert.match(out, /--changed-only|usage|common flags/i, `${cmd.join(" ")} prints help`);
+    await assert.rejects(
+      () => import("node:fs/promises").then((fs) => fs.access(path.join(dir, "ran.txt"))),
+      undefined,
+      `${cmd.join(" ")} must not execute cases`
+    );
+  }
+});
+
+test("inputs.mustContain: a resolved-but-degraded system prompt fails before any model call", async () => {
+  // The 0-byte floor cannot see this: 54k bytes came back, just missing the
+  // DB-derived case-list section. mustContain names one marker per assembled
+  // section; a builder that "succeeds" without it fails the case at zero cost.
+  const dir = await scaffold({
+    "prompts/full.txt": "You are a tutor.\nCASE LIST:\nCase 1: greetings\nCase 2: orders\n",
+    "prompts/degraded.txt": "You are a tutor.\n(sections missing — db was down)\n",
+    "heyllm.yaml": `
+providers:
+  fake: { kind: command, command: "echo", outputPath: null }
+layers:
+  - name: chat
+    kind: llm
+    provider: fake
+    inputs: { system: file, mustContain: ["Case 1:"] }
+    cases:
+      - { name: ok,       system: "file:prompts/full.txt",     prompt: hi, expect: { text: { $exists: true } } }
+      - { name: degraded, system: "file:prompts/degraded.txt", prompt: hi, expect: { text: { $exists: true } } }
+`,
+  });
+  const summary = await runSuite(await loadConfig(path.join(dir, "heyllm.yaml")));
+  const byName = (n) => summary.layers[0].cases.find((c) => c.name === n).result;
+  assert.equal(byName("ok").ok, true);
+  const bad = byName("degraded");
+  assert.equal(bad.ok, false);
+  assert.match(bad.failures[0].message, /missing the declared marker "Case 1:"/);
+  assert.match(bad.failures[0].message, /DEGRADED/);
+});
+
+test("inputs.mustContain: empty list / empty marker is a config error, not a silent no-op", async () => {
+  for (const mc of ["[]", '[""]', '["ok", "  "]']) {
+    const dir = await scaffold({
+      "heyllm.yaml": `
+providers:
+  fake: { kind: command, command: "echo", outputPath: null }
+layers:
+  - name: chat
+    kind: llm
+    provider: fake
+    inputs: { mustContain: ${mc} }
+    cases: [{ name: x, prompt: hi }]
+`,
+    });
+    await assert.rejects(() => loadConfig(path.join(dir, "heyllm.yaml")), /mustContain: must be a non-empty list/);
+  }
+});

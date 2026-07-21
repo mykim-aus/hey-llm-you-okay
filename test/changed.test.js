@@ -438,3 +438,65 @@ test("cache-replay re-checks a changed `expect:` for free (expect is not in the 
   assert.ok(r.cached, "replayed from cache");
   assert.equal(r.ok, false, "the NEW expect is evaluated against the cached output — and fails, for free");
 });
+
+test("cacheOutputs:false — fingerprints only: no user data on disk, skip instead of replay", async () => {
+  // The cached output IS the user data the prompt carried (the model's verbatim
+  // reply about this learner). Privacy-sensitive projects set cacheOutputs:false
+  // and trade the cached-replay verdict for a plain unchanged-skip.
+  const dir = await scaffold(`
+providers:
+  m: { kind: openai-compatible, baseUrl: "{{MOCK}}/v1", model: mock-1 }
+settings:
+  changedOnly: { cacheOutputs: false }
+layers:
+  - name: b
+    kind: llm
+    provider: m
+    cases:
+      - name: greet
+        system: "SAY: hello"
+        prompt: "hi"
+        expect: { text: { $contains: hello } }
+`);
+  await run(dir); // populate
+  const st = await store(dir);
+  assert.ok(st.cases["b/greet"]?.fp, "fingerprint recorded");
+  assert.equal(st.cases["b/greet"].output, undefined, "no output persisted");
+
+  const { s, calls } = await runCounting(dir, { changedOnly: true });
+  const r = caseOf(s, "b", "greet").result;
+  assert.equal(calls, 0, "no model call");
+  assert.ok(r.skipped, "skip, not a cached replay");
+  assert.ok(!r.cached, "replay is impossible without a stored output");
+});
+
+test("cacheOutputs:false retroactively scrubs outputs cached before the setting existed", async () => {
+  const cfg = (extra) => `
+providers:
+  m: { kind: openai-compatible, baseUrl: "{{MOCK}}/v1", model: mock-1 }
+${extra}layers:
+  - name: b
+    kind: llm
+    provider: m
+    cases:
+      - name: greet
+        system: "SAY: hello"
+        prompt: "hi"
+        expect: { text: { $contains: hello } }
+`;
+  const dir = await scaffold(cfg(""));
+  await run(dir); // caches WITH output (default)
+  assert.ok((await store(dir)).cases["b/greet"].output, "output cached under the default");
+
+  // the project later declares cacheOutputs:false — the next run must scrub
+  await writeFile(
+    path.join(dir, "heyllm.yaml"),
+    cfg("settings:\n  changedOnly: { cacheOutputs: false }\n").replaceAll("{{MOCK}}", mock.base)
+  );
+  await run(dir, { changedOnly: true }); // skip run, but the scrub must still persist
+  assert.equal(
+    (await store(dir)).cases["b/greet"].output,
+    undefined,
+    "previously cached user data is removed from disk, not grandfathered"
+  );
+});

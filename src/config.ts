@@ -118,11 +118,19 @@ export async function loadConfig(
         err(`${at} (${l.name}): 'inputs' only applies to llm/judge layers, not '${l.kind}'`);
       if (!isPlainObject(l.inputs)) err(`${at}.inputs: must be a mapping`);
       for (const k of Object.keys(l.inputs))
-        if (k !== "system") err(`${at}.inputs: unknown key '${k}' (only 'system' is supported)`);
+        if (k !== "system" && k !== "mustContain")
+          err(`${at}.inputs: unknown key '${k}' ('system' and 'mustContain' are supported)`);
       // An empty/half-written `inputs:` block reads as a declared contract but
       // enforces nothing — the silent-no-op shape this project rejects.
-      if (l.inputs.system === undefined)
-        err(`${at}.inputs: needs 'system' (${INPUTS_SYSTEM_MODES.join(" | ")}) — an empty inputs block enforces nothing`);
+      if (l.inputs.system === undefined && l.inputs.mustContain === undefined)
+        err(`${at}.inputs: needs 'system' (${INPUTS_SYSTEM_MODES.join(" | ")}) and/or 'mustContain' — an empty inputs block enforces nothing`);
+      if (l.inputs.mustContain !== undefined) {
+        const mc = l.inputs.mustContain;
+        // Empty list / empty string are the same silent no-op: they "declare"
+        // completeness while matching everything.
+        if (!Array.isArray(mc) || !mc.length || mc.some((s: unknown) => typeof s !== "string" || !s.trim()))
+          err(`${at}.inputs.mustContain: must be a non-empty list of non-empty marker strings`);
+      }
       if (l.inputs.system !== undefined && !INPUTS_SYSTEM_MODES.includes(l.inputs.system))
         err(`${at}.inputs.system: ${suggest(l.inputs.system, INPUTS_SYSTEM_MODES)}`);
     }
@@ -138,6 +146,9 @@ export async function loadConfig(
   const globalMaxAge = settings.changedOnly?.maxCacheAgeDays;
   if (globalMaxAge !== undefined && (typeof globalMaxAge !== "number" || !(globalMaxAge > 0)))
     err(`${file}: settings.changedOnly.maxCacheAgeDays must be a positive number of days`);
+  const cacheOutputs = settings.changedOnly?.cacheOutputs;
+  if (cacheOutputs !== undefined && typeof cacheOutputs !== "boolean")
+    err(`${file}: settings.changedOnly.cacheOutputs must be true or false`);
 
   // settings.envFile — load API keys from a local .env so `heyllm run` works
   // without manual exports. Real env vars always win (CI secrets are safe).

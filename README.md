@@ -170,6 +170,63 @@ heyllm asserts on **inputs and outputs**, never on a chat UI — so the same fiv
 
 The examples below lean on a support-assistant story only because one running example is easier to follow — nothing in the tool is chat-specific.
 
+## When the model's reply is your router
+
+Some products aren't chatbots: the model's reply *is* the router. The reply decides which mode the user lands in — speaking, listening, a PTE drill, a dictation-mode UI — and the text is almost incidental. The routing is the product, and a misroute is the bug.
+
+The honest starting point is Jest + Playwright, and both do real work here: a mocked-model Jest unit genuinely asserts a branch, and a Playwright run genuinely drives the mode into the DOM. Where they stopped scaling for prompt work:
+
+- A mocked model froze the routing at mock-authoring time: retune the prompt and the mock stays green while the live model starts routing differently — green test, broken prod.
+- The real-UI Playwright run needed real login/auth and was flaky on streaming, a delayed auto-send, and WebSocket latency — a pre-release smoke check, not something to run on every prompt tweak.
+- Real-model tests cost money and are nondeterministic, so re-running the whole suite on every prompt edit wasn't viable.
+- On red, neither tool attributed fault: your prompt edit vs. the provider quietly changing the model.
+- The tests lived in three places — Jest units, Playwright E2E, ad-hoc LLM scripts — with no single ordered pipeline.
+
+Four daily questions, each mapped to a heyllm layer below:
+
+| The question | The layer |
+|---|---|
+| Given this input, did the model route to the right case? (would/will → case 8, not 13) | [`llm`](#llm--deterministic-assertions-on-real-model-output): `anyToolCalled` grounded by case number, against the real model |
+| Did the reply drive the right app mode/UI? (dictation request → dictation mode) | [`dispatch`](#dispatch--what-your-app-did-with-the-response): fold the reply through your reducer, assert the STATE (not the pixels — that stays Playwright's) |
+| New misroute in prod — add a case | append a YAML block, or `heyllm capture "<the misrouted input>"` promotes it into a golden case |
+| Edited one prompt — did it break the others? | [`--changed-only`](#--changed-only-only-pay-for-what-actually-changed) + `heyllm triage` |
+
+The three test systems unify as the gated pyramid: the cheap deterministic layers (static/exec/dispatch) run first and gate the expensive real-model layer, and the Jest/Playwright you already have get wrapped as `exec` stages rather than rewritten.
+
+One run over all three:
+
+```yaml
+kind: llm
+cases:
+  # 1. would/will must recommend CASE 8 — real model, deterministic assertion
+  - name: would-vs-will-recommends-case-8
+    system: exec:../../src/buildPrompt.ts      # the same builder production calls
+    prompt: "what is the difference between would and will?"
+    expect:
+      anyToolCalled: { names: [recommend_case], args: { caseNumber: 8 } }
+
+  # 2. a dictation REQUEST must land the user in dictation mode. The LIVE model
+  #    picks the call; dispatch folds it through the app's own reducer and asserts
+  #    the STATE the user reaches — the whole reply→mode chain, not a hardcoded call.
+  - name: dictation-request-opens-dictation-mode
+    system: exec:../../src/buildPrompt.ts
+    prompt: "let me type what I hear instead of speaking"
+    dispatch:
+      module: ../../app/modeReducer.js
+      initialState: { mode: speaking }
+      expect: { state: { mode: dictation } }
+```
+
+```bash
+# 3. edit ONE prompt, then check the blast radius
+vim src/prompts/router.txt
+heyllm run --changed-only   # re-runs live ONLY the cases whose resolved PAYLOAD moved;
+                            # replays the rest from cache at zero tokens (proof: untouched)
+heyllm triage               # any green→red case: YOUR-CHANGE (this edit) vs MODEL-DRIFT
+```
+
+The isolation is empirical, not a static proof: a payload fingerprint flags which cases the edit moved, an actual re-run checks them, and `triage` attributes any regression — bounded by model determinism (`repeat`/`passRate`), not a dependency graph. The untouched cases are confirmed by replaying their cached pass, not a fresh call, so provider drift on those surfaces only on the [`maxCacheAgeDays`](#maxcacheagedays-re-verify-on-a-cadence-to-catch-provider-drift) cadence.
+
 ## Layer kinds
 
 ### `static` — free, instant

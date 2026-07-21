@@ -322,6 +322,46 @@ question — *is the test even sending what production sends?* — dissolved it.
 
 ---
 
+## The durable payoff: the loop after the audit
+
+The four bugs above were a one-time audit. What keeps the suite in the loop afterward is a check that runs on every prompt tweak — and here the model output **is** the router: an input picks a grammar case, a mode, a UI panel, and the reply text is almost incidental. Three questions recur daily, each already covered by a documented layer.
+
+**Did the input route to the right recommendation?** *"What is the difference between* would *and* will*?"* should recommend case 8; a bad edit sends it to case 13. The [`llm`](README.md#llm--deterministic-assertions-on-real-model-output) layer asserts the real model's call, with `system:` shelled in from the production builder so the test sends what production sends:
+
+```yaml
+kind: llm
+cases:
+  - name: would-vs-will-routes-to-case-8
+    system: "exec:node scripts/print-system-prompt.mjs"
+    prompt: "what is the difference between would and will?"
+    expect:
+      anyToolCalled: { names: [recommendCase], args: { caseNumber: 8 } }
+```
+
+The assertion pins the case number, not the branch — the over-strict-tool-name trap from the postscript, avoided by construction: assert the recommendation, not which of two tools produced it.
+
+**Did the output drive the right UI state?** A dictation request should open the dictation-mode panel. The [`dispatch`](README.md#dispatch--what-your-app-did-with-the-response) layer folds the recorded calls through the app's own reducer and asserts the state reached — no model calls, gated on every commit. This pins the branch, not the pixels — the rendered DOM stays Playwright's job — but the branch is where the misroute lives.
+
+```yaml
+kind: dispatch
+cases:
+  - name: dictation-request-opens-dictation-panel
+    module: ../../app/assistantReducer.js
+    initialState: { mode: chat, panel: null }
+    calls: [{ name: set_mode, args: { mode: dictation } }]
+    expect: { state: { mode: dictation, panel: dictation } }
+```
+
+**A new misroute showed up in prod?** Append a case, or `heyllm capture "<the misrouted input>"` seeds it as a reviewable golden case — capture writes the prompt and tags only; a human adds the `expect:` in review, so it records what to check, it does not yet assert the fix.
+
+### The one-prompt blast-radius loop
+
+Retuning one prompt should not cost a full-suite re-run. `heyllm run --changed-only` re-runs live only the cases whose resolved payload actually moved and confirms the rest by **replaying their last passing output through the assertions — not by calling the model again**. A case that flips green→red is a flip to attribute, not yet a regression: `heyllm triage` runs its own A/B probe and returns *flaky* (resampling noise), *your-change* (this edit), or *model-drift* (the provider), each with a confidence level. It does not pre-judge fault.
+
+Be exact about what this proves. The isolation is empirical — fingerprint impact detection, an actual re-run of what moved, triage attribution — not a static dependency graph and not a guarantee. An "untouched" case is proven unchanged in *input*, not re-proven live; provider drift on those surfaces only when [`maxCacheAgeDays`](README.md#maxcacheagedays-re-verify-on-a-cadence-to-catch-provider-drift) forces a re-run. Its floor is model determinism: a case at `passRate < 1` can flip on resampling, which is `repeat`'s job to characterise, not [`--changed-only`](README.md#--changed-only-only-pay-for-what-actually-changed)'s to hide.
+
+---
+
 ## The transferable lesson
 
 Every finding here — four product bugs and five of the tool's own — is the same
