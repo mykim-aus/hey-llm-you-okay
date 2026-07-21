@@ -133,7 +133,7 @@ export interface ProviderConfig {
   cwd?: string;
 }
 
-export type LayerKind = "static" | "exec" | "http" | "llm" | "judge" | "dispatch" | "chain";
+export type LayerKind = "static" | "exec" | "http" | "llm" | "judge" | "dispatch" | "chain" | "scenario" | "conversation";
 
 export interface Scale {
   min: number;

@@ -20,7 +20,7 @@ import { INPUTS_SYSTEM_MODES, lintInputsContract } from "./inputs.js";
 import { checkDispatchMode } from "./layers/dispatch.js";
 import type { CaseDef, HeyLLMConfig, LayerConfig, LayerKind, ProviderConfig, ProviderKind } from "./types.js";
 
-export const LAYER_KINDS: LayerKind[] = ["static", "exec", "http", "llm", "judge", "dispatch", "chain"];
+export const LAYER_KINDS: LayerKind[] = ["static", "exec", "http", "llm", "judge", "dispatch", "chain", "scenario", "conversation"];
 export const PROVIDER_KINDS: ProviderKind[] = ["openai-compatible", "anthropic", "gemini", "command"];
 
 export class ConfigError extends Error {}
@@ -136,7 +136,7 @@ export async function loadConfig(
     }
     if (l.maxCacheAgeDays !== undefined && (typeof l.maxCacheAgeDays !== "number" || !(l.maxCacheAgeDays > 0)))
       err(`${at}.maxCacheAgeDays: must be a positive number of days`);
-    const gate = l.gate !== undefined ? !!l.gate : !["llm", "judge"].includes(l.kind);
+    const gate = l.gate !== undefined ? !!l.gate : !["llm", "judge", "scenario", "conversation"].includes(l.kind);
     return { ...l, gate } as LayerConfig;
   });
 
@@ -239,8 +239,10 @@ const STATIC_FILE_KEYS = ["file", "files", "mustExist", "forbid", "require", "js
 
 const KIND_KEYS: Record<string, string[]> = {
   static: ["file", "files", "mustExist", "forbid", "require", "jsonValid", "yamlValid", "maxBytes", "compare"],
-  exec: ["command", "cwd", "env", "timeoutMs"],
+  exec: ["command", "cwd", "env", "timeoutMs", "parseStdout"],
   http: ["request", "save"],
+  scenario: ["request", "body", "userField", "historyField", "historyContentKey", "replyPath", "turns", "save"],
+  conversation: ["request", "body", "userField", "historyField", "historyContentKey", "replyPath", "turns", "save", "rubric", "threshold", "votes", "scale", "reliability", "context", "judgeParams", "minScores"],
   llm: ["system", "prompt", "messages", "conversation", "tools", "toolResponses", "params", "maxRounds", "repeat", "passRate", "dispatch"],
   judge: ["input", "output", "transcript", "context", "rubric", "scale", "votes", "threshold", "minScores", "judgeParams", "reliability"],
   dispatch: ["module", "export", "command", "args", "cwd", "env", "timeoutMs", "initialState", "calls"],
@@ -330,8 +332,45 @@ export function validateCases(layer: LayerConfig, groups: CaseGroup[]): string[]
         case "http":
           need(cs.request?.url, g.file, cs, "needs 'request.url'");
           break;
+        case "scenario": {
+          need(cs.request?.url, g.file, cs, "needs 'request.url'");
+          need(Array.isArray(cs.turns) && cs.turns.length, g.file, cs, "needs a non-empty 'turns' array");
+          // scenario asserts PER TURN; a case-level `expect` would be silently dropped.
+          need(cs.expect === undefined, g.file, cs, "scenario asserts per turn — put `expect` inside a turn, not on the case (a case-level expect is silently dropped)");
+          const TURN_KEYS = new Set(["user", "expect", "save"]);
+          for (const t of cs.turns || []) {
+            need(typeof t?.user === "string", g.file, cs, "every scenario turn needs a 'user' string");
+            if (isPlainObject(t))
+              for (const k of Object.keys(t))
+                if (!TURN_KEYS.has(k))
+                  need(false, g.file, cs, `unknown scenario turn key '${k}' (allowed: user, expect, save) — a typo'd key would silently drop the assertion`);
+            lintExpectRegexes(t?.expect, at, problems);
+          }
+          break;
+        }
+        case "conversation": {
+          need(cs.request?.url, g.file, cs, "needs 'request.url'");
+          need(Array.isArray(cs.turns) && cs.turns.length, g.file, cs, "needs a non-empty 'turns' array");
+          need(Array.isArray(cs.rubric) && cs.rubric.length, g.file, cs, "needs a non-empty 'rubric' (it judges the transcript)");
+          const CK = new Set(["user", "expect", "save"]);
+          for (const t of cs.turns || []) {
+            need(typeof t?.user === "string", g.file, cs, "every conversation turn needs a 'user' string");
+            if (isPlainObject(t))
+              for (const k of Object.keys(t))
+                if (!CK.has(k)) need(false, g.file, cs, `unknown conversation turn key '${k}' (allowed: user, expect, save)`);
+            lintExpectRegexes(t?.expect, at, problems);
+          }
+          for (const r of cs.rubric || []) need(r.id && r.question, g.file, cs, "every rubric item needs 'id' and 'question'");
+          break;
+        }
         case "llm":
           need(cs.prompt || cs.messages || cs.conversation, g.file, cs, "needs 'prompt', 'messages' or 'conversation'");
+          // an empty conversation/messages array is truthy but runs zero turns —
+          // a vacuous pass. Require content.
+          if (Array.isArray(cs.conversation))
+            need(cs.conversation.length, g.file, cs, "'conversation' is empty — add at least one turn, or it verifies nothing");
+          if (Array.isArray(cs.messages))
+            need(cs.messages.length, g.file, cs, "'messages' is empty — add at least one message, or it verifies nothing");
           break;
         case "dispatch": {
           const modeProblem = checkDispatchMode(cs);

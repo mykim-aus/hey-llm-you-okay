@@ -54,11 +54,21 @@ export interface PromptRecord {
   output?: CachedOutput;
 }
 
+export interface CachedTurn {
+  text: string;
+  fullText: string;
+  toolCalls: { id?: string; name: string; args: Record<string, unknown> }[];
+}
+
 export interface CachedOutput {
   text: string;
   fullText: string;
   /** tool calls with args, so toolCalled/toolArgs replay exactly */
   toolCalls: { id?: string; name: string; args: Record<string, unknown> }[];
+  /** conversation cases: each turn's output, so a multi-turn dispatch fold can be
+   *  re-driven (threaded per-turn UI state) on replay — the whole conversation's
+   *  response→UI matrix re-verified at zero model cost under --changed-only. */
+  turns?: CachedTurn[];
 }
 
 export interface PromptStore {

@@ -74,6 +74,8 @@ export function startMockLLM() {
             ],
             ...(state.omitUsage
               ? {}
+              : state.totalOnly
+              ? { usage: { total_tokens: inTok + outTok } } // no in/out split — the fail-open case for spend accounting
               : { usage: { prompt_tokens: inTok, completion_tokens: outTok, total_tokens: inTok + outTok } }),
           });
         };

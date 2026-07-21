@@ -289,8 +289,11 @@ export function checkDispatchMode(spec: Record<string, any>): string | null {
 
 // The keys a dispatch spec / block may carry. An unknown key is almost always a
 // typo (`expct:`), and silently dropping it discards the assertion — a green
-// tick for a check that never ran.
-const DISPATCH_BLOCK_KEYS = new Set(["module", "export", "command", "args", "cwd", "env", "timeoutMs", "initialState", "expect", "calls", "fold", "textEvent"]);
+// tick for a check that never ran. `calls` is intentionally NOT here: it is
+// valid ONLY on a standalone `kind: dispatch` case, never on an embedded
+// `dispatch:` block (whose calls come from the live model) — so a stray `calls:`
+// inside a block is a real mistake and must be flagged, not silently accepted.
+const DISPATCH_BLOCK_KEYS = new Set(["module", "export", "command", "args", "cwd", "env", "timeoutMs", "initialState", "expect", "fold", "textEvent"]);
 
 /** Valid values for a dispatch block's `fold:` list. */
 const FOLD_PARTS = new Set(["toolCalls", "text"]);
@@ -305,12 +308,17 @@ const FOLD_PARTS = new Set(["toolCalls", "text"]);
 export function checkDispatchSpec(spec: Record<string, any>, embedded: boolean, requireExpect = true): string | null {
   const mode = checkDispatchMode(spec);
   if (mode) return mode;
-  const allowed = embedded ? DISPATCH_BLOCK_KEYS : DISPATCH_BLOCK_KEYS;
   for (const k of Object.keys(spec))
-    if (!allowed.has(k)) {
-      // `calls` is legal on a kind: dispatch case, not on an embedded block.
+    if (!DISPATCH_BLOCK_KEYS.has(k)) {
+      // `calls` is legal ONLY on a standalone kind: dispatch case, not on an
+      // embedded `dispatch:` block (its calls come from the model).
       if (k === "calls" && !embedded) continue;
-      const near = k === "expct" || k === "expects" ? " (did you mean 'expect'?)" : "";
+      const near =
+        k === "expct" || k === "expects"
+          ? " (did you mean 'expect'?)"
+          : k === "calls" && embedded
+            ? " — 'calls' is not valid on an embedded dispatch block; the model's calls are folded automatically"
+            : "";
       return `unknown dispatch key '${k}'${near} — a typo'd key is silently dropped, which would discard the assertion`;
     }
   if (spec.fold !== undefined) {

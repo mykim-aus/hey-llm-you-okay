@@ -120,6 +120,23 @@ test("--grep with a missing value is a usage error, not a silent all-filtered PA
   assert.match(stderr, /--grep requires a value/);
 });
 
+test("[review#7] --max-spend with a non-positive / non-numeric value is a usage error", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "heyllm-spend-"));
+  execFileSync("node", [CLI, "init"], { cwd: dir, stdio: "pipe" });
+  for (const bad of ["0", "-5", "abc"]) {
+    let code = 0;
+    let stderr = "";
+    try {
+      execFileSync("node", [CLI, "run", "--only", "static", "--max-spend", bad], { cwd: dir, stdio: "pipe" });
+    } catch (e) {
+      code = e.status;
+      stderr = String(e.stderr);
+    }
+    assert.equal(code, 2, `--max-spend ${bad} must exit 2 (usage error), not silently disable the cap`);
+    assert.match(stderr, /--max-spend/);
+  }
+});
+
 test("--version prints the version (not the help screen)", () => {
   const out = execFileSync("node", [CLI, "--version"], { encoding: "utf8" });
   assert.match(out.trim(), /^heyllm \d+\.\d+\.\d+$/);

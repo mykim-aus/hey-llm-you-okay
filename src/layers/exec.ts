@@ -102,16 +102,40 @@ export async function runExecCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult
       outputTail: (actual.stderr || actual.stdout).slice(-4000),
     };
   if (actual.timedOut) failures.push({ path: "command", message: `timed out after ${timeoutMs}ms` });
+  // `parseStdout: true` — the command emits JSON on stdout (e.g. a Playwright /
+  // Puppeteer check printing the UI state it observed: {"panelVisible": true}).
+  // This makes browser/DOM assertions first-class WITHOUT heyllm shipping a
+  // browser dependency: your script drives the page, prints what it saw, and the
+  // exec case asserts it with json/jsonPath — the same matchers as every layer.
+  const wantsJson = !!cs.parseStdout;
+  const PARSE_FAIL = Symbol("parse-fail");
+  let parsed: unknown = undefined;
+  if (wantsJson) {
+    try {
+      parsed = JSON.parse((actual.stdout || "").trim());
+    } catch {
+      parsed = PARSE_FAIL;
+    }
+    if (parsed === PARSE_FAIL)
+      failures.push({ path: "stdout", message: "parseStdout: true but stdout was not valid JSON" });
+  }
   // keys that exist on other layers but never on a process result — reject
-  // loudly (copying an http/llm case into exec must not silently always-pass)
-  for (const key of ["status", "json", "jsonPath", "text", "headers"])
+  // loudly (copying an http/llm case into exec must not silently always-pass).
+  // json/jsonPath are allowed ONLY under parseStdout.
+  const forbidden = wantsJson ? ["status", "text", "headers"] : ["status", "json", "jsonPath", "text", "headers"];
+  for (const key of forbidden)
     if (cs.expect && key in cs.expect)
       failures.push({
         path: key,
-        message: `'${key}' is not available on an exec case (did you mean 'stdout' or 'stderr'?)`,
+        message: `'${key}' is not available on an exec case${wantsJson ? "" : " (did you mean 'stdout' or 'stderr'? add parseStdout: true to assert JSON printed on stdout)"}`,
       });
-  const { status, json, jsonPath, text, headers, ...rest } = (cs.expect || {}) as Record<string, unknown>;
-  applyExpect({ exitCode: 0, ...rest }, actual, failures);
+  const clean: Record<string, unknown> = { ...(cs.expect || {}) };
+  for (const k of forbidden) delete clean[k];
+  applyExpect(
+    { exitCode: 0, ...clean },
+    { ...actual, ...(wantsJson && parsed !== PARSE_FAIL ? { json: parsed } : {}) },
+    failures
+  );
   return {
     ok: !failures.length,
     failures,

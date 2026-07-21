@@ -30,7 +30,7 @@ import { ProviderError, callProvider, deepGet, interpolateDeep, resolveRef } fro
 import { checkInputContract } from "../inputs.js";
 import { checkDispatchExpect, createFolder, runDispatchBlock, type Folder } from "./dispatch.js";
 import { caseKey } from "../baseline.js";
-import { changedRunReason, fingerprintLlm, isCacheStale, normalizeIgnore, unchangedSkipReason } from "../changed.js";
+import { changedRunReason, fingerprintLlm, isCacheStale, normalizeIgnore, unchangedSkipReason, type CachedTurn } from "../changed.js";
 
 const toArr = (v: unknown): string[] => (v === undefined ? [] : Array.isArray(v) ? v : [v as string]);
 
@@ -366,6 +366,14 @@ export async function runLlmCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult>
   const contract = checkInputContract(cs, inputs, ctx.layer);
   if (contract.length) return { ok: false, failures: contract };
 
+  // An empty conversation/messages array runs zero turns and would pass having
+  // verified nothing (`heyllm run` does not call the validator). Fail it here.
+  if (
+    (inputs.mode === "conversation" && !(inputs.conversation?.length)) ||
+    (inputs.mode === "messages" && !(inputs.messages?.length))
+  )
+    return { ok: false, failures: [{ path: inputs.mode, message: `'${inputs.mode}' is empty — zero turns ran, nothing was verified` }] };
+
   // --changed-only: if the EXACT payload (system + turns + tools + params +
   // model) is byte-identical to this case's last run, skip before any paid call.
   // The fingerprint is emitted regardless so a normal run refreshes the store.
@@ -394,6 +402,45 @@ export async function runLlmCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult>
       // conversation+dispatch cases can't be replayed from one final output
       // (per-turn state); they were never cached, so prev.output is absent →
       // they fall through to the plain skip below.
+      // conversation + dispatch: re-drive the THREADED per-turn fold from the
+      // cached turns — the whole multi-turn response→UI matrix, verified at zero
+      // model cost.
+      if (prev.output?.turns?.length && cs.dispatch && inputs.mode === "conversation") {
+        const failures: Failure[] = [];
+        let foldState: unknown;
+        let foldEffects: unknown[] | undefined;
+        try {
+          const folder = await createFolder(cs.dispatch, ctx);
+          const convTurns = inputs.conversation || [];
+          for (let ti = 0; ti < prev.output.turns.length; ti++) {
+            const t = prev.output.turns[ti];
+            const a: LlmActual = { text: t.text, fullText: t.fullText, json: safeJson(t.text), toolCalls: t.toolCalls, toolNames: t.toolCalls.map((c) => c.name) };
+            const { stateExpect, llmExpect } = splitStateExpect(convTurns[ti]?.expect);
+            const fs: Failure[] = [];
+            checkLlmExpect(llmExpect, a, fs);
+            const outcome = await folder.fold({ toolCalls: t.toolCalls, text: t.fullText });
+            foldState = outcome.state;
+            foldEffects = outcome.effects;
+            checkDispatchExpect(stateExpect, outcome, fs, "dispatch");
+            for (const f of fs) failures.push({ ...f, path: `turn[${ti}].${f.path}` });
+          }
+          // case-level cs.expect against the final turn (toolCalls accumulated, as live)
+          const finalT = prev.output.turns.at(-1)!;
+          const allCalls = prev.output.turns.flatMap((t) => t.toolCalls);
+          checkLlmExpect(cs.expect, { text: finalT.text, fullText: finalT.fullText, json: safeJson(finalT.text), toolCalls: allCalls, toolNames: allCalls.map((c) => c.name) }, failures);
+        } catch (e: any) {
+          failures.push({ path: "dispatch", message: `reducer threw on replay: ${e.message}` });
+        }
+        return {
+          ok: !failures.length,
+          failures,
+          cached: `input unchanged since ${prev.at} — replayed the cached ${prev.output.turns.length}-turn fold (no model call)`,
+          detail: { attempts: 0, cached: true },
+          dispatchState: foldState,
+          dispatchEffects: foldEffects,
+          resolvedInputs: inputs,
+        };
+      }
       if (prev.output) {
         const cachedActual: LlmActual = {
           text: prev.output.text,
@@ -452,6 +499,7 @@ export async function runLlmCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult>
   // passed (in which case the case fails and nothing gets cached anyway).
   let passingActual: LlmActual | undefined;
   let lastActual: LlmActual | undefined;
+  let passingTurns: CachedTurn[] | undefined; // conversation: per-turn outputs of the passing attempt (for multi-turn fold replay)
   // conversation + dispatch: fold each turn onto a THREADED state and assert
   // per-turn `expect.state` — the multi-turn UI joint (a turn-2 stale panel that
   // turn-1 set). Single-turn dispatch stays a post-hoc fold of the one response.
@@ -460,10 +508,12 @@ export async function runLlmCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult>
     const failures: Failure[] = [];
     let folder: Folder | null = null;
     let foldOutcome: { state: unknown; effects: unknown[] } | undefined;
+    const turnOutputs: CachedTurn[] = []; // captured for a multi-turn fold cache-replay
     const onTurn = convFold
       ? async (turn: TurnOutcome, ti: number, turnDef: ConvTurn) => {
           if (!folder) folder = await createFolder(cs.dispatch, ctx); // fresh per attempt
           const a = buildActual(turn);
+          turnOutputs.push({ text: a.text, fullText: a.fullText, toolCalls: turn.toolCalls });
           const { stateExpect, llmExpect } = splitStateExpect(turnDef.expect);
           const fs: Failure[] = [];
           checkLlmExpect(llmExpect, a, fs);
@@ -498,7 +548,10 @@ export async function runLlmCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult>
       }
       // record a passing attempt AFTER the fold ran — the cached replay must
       // agree with the live verdict, which includes the UI outcome.
-      if (!failures.length && !passingActual) passingActual = actual;
+      if (!failures.length && !passingActual) {
+        passingActual = actual;
+        if (convFold) passingTurns = turnOutputs;
+      }
       attempts.push({ ok: !failures.length, failures, toolNames: actual.toolNames, text: actual.text });
     } catch (e: any) {
       const infra = e instanceof ProviderError;
@@ -533,13 +586,15 @@ export async function runLlmCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult>
     failures.push(...(attempts.find((a) => !a.ok && !(a.failures || []).some((f) => f.infra))?.failures || []));
   }
   // Cache a PASSING attempt's output for a future --changed-only replay. The
-  // cached { text, fullText, toolCalls } is enough to REPLAY a single-turn
-  // dispatch fold too (re-derive the UI outcome for free). The one shape that
-  // can't be replayed from a single final output is conversation+dispatch
-  // (per-turn state), so that stays uncached. Record-on-pass; the passing
+  // cached { text, fullText, toolCalls } replays a single-turn dispatch fold;
+  // conversation+dispatch additionally stores the per-turn outputs (`turns`), so
+  // the whole THREADED multi-turn fold re-verifies for free. A conversation+
+  // dispatch case with no captured turns (shouldn't happen) stays uncached so it
+  // never falls into the single-output replay path. Record-on-pass; the passing
   // attempt (not the last) keeps the replay verdict equal to live.
   const toCache = passingActual ?? lastActual;
-  const cacheable = ok && toCache && !(cs.dispatch && inputs.mode === "conversation");
+  const needsTurns = cs.dispatch && inputs.mode === "conversation";
+  const cacheable = ok && toCache && (!needsTurns || !!passingTurns);
   return {
     ok,
     failures,
@@ -549,7 +604,15 @@ export async function runLlmCase(cs: CaseDef, ctx: CaseCtx): Promise<CaseResult>
     resolvedInputs: inputs, // triage snapshots exactly what was sent
     attemptsDetail: attempts,
     promptFingerprint: cacheable
-      ? { ...promptFingerprint, output: { text: toCache!.text, fullText: toCache!.fullText, toolCalls: toCache!.toolCalls } }
+      ? {
+          ...promptFingerprint,
+          output: {
+            text: toCache!.text,
+            fullText: toCache!.fullText,
+            toolCalls: toCache!.toolCalls,
+            ...(passingTurns ? { turns: passingTurns } : {}),
+          },
+        }
       : promptFingerprint,
   };
 }

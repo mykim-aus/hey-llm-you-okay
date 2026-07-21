@@ -18,7 +18,7 @@ export { loadBaseline, saveBaseline, caseKey } from "./baseline.js";
 export { matchValue, applyExpect } from "./assert.js";
 export { runCompare, formatCompareReport, summarizeCompare, detectSections, normalizeCompareSpec } from "./compare.js";
 export { printSummary } from "./report/console.js";
-export { renderPipelines, type PipelineStage } from "./report/pipelines.js";
+export { renderPipelines, pipelinesJson, flakyFromHistory, type PipelineStage, type PipelineOpts } from "./report/pipelines.js";
 export { writeJsonReport } from "./report/json.js";
 export { writeJunitReport } from "./report/junit.js";
 export * from "./types.js";

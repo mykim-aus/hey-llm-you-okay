@@ -94,6 +94,23 @@ Try the **fully offline demo** (no API keys — a mock provider simulates model 
 npm run demo
 ```
 
+## Migrating an existing suite with an AI agent
+
+heyllm ships an agent-facing spec, [AGENTS.md](AGENTS.md) — point a coding agent at that file, not this README. It is a condensed, verified reference (every key checked against the validator) for turning Jest / Playwright / ad-hoc LLM scripts into heyllm cases.
+
+A prompt you can paste into your agent:
+
+> Read AGENTS.md in this repo, then convert the tests under `tests/` into heyllm cases and a `heyllm.yaml`. Wrap the existing runners (Jest/pytest/Playwright) as `exec` layers — do not rewrite them. File/prompt hygiene becomes `static`; deterministic app-logic that folds the model's calls through a reducer becomes `dispatch`; live-model routing/behavior becomes `llm` with deterministic `expect` (assert the tool call or the routed outcome); subjective quality becomes `judge`, last, with binary rubric items. Every case must carry a real assertion. Every `system:` must be an `exec:` ref to the production prompt builder — never an inline copy of the prompt. Then run `heyllm validate` and fix anything it reports.
+
+Then verify — the first step spends zero tokens:
+
+```bash
+npx heyllm validate      # config + cases lint, no model calls
+npx heyllm run           # run the pyramid
+```
+
+An AI-generated suite fails in one predictable way: plausible cases that verify nothing. heyllm is built to refuse exactly that green. An `expect`-less case is an error, not a pass. A `file:`/`exec:` ref that resolves to nothing fails loudly instead of testing an empty string. And `inputs: { system: exec }` on a layer stops the agent from quietly testing a hand-copied prompt instead of the one you ship. What the tool cannot decide for you is which behaviors are worth asserting — so read the cases it produced. It will catch the vacuous ones; only you know what actually matters. (I migrated my own production suite this way.)
+
 ## The config: `heyllm.yaml`
 
 ```yaml
@@ -152,8 +169,8 @@ layers:                             # ← executes top-to-bottom: CHEAP FIRST
     threshold: 7
 ```
 
-Layer kinds: `static` · `exec` · `http` · `dispatch` · `llm` · `judge`.
-Gate defaults: `static`/`exec`/`http`/`dispatch` are **gated** (deterministic — a failure halts the pyramid), `llm`/`judge` are **warn-only** unless you set `gate: true`.
+Layer kinds: `static` · `exec` · `http` · `dispatch` · `scenario` · `conversation` · `llm` · `judge` · `chain`.
+Gate defaults: `static`/`exec`/`http`/`dispatch`/`chain` are **gated** (deterministic — a failure halts the pyramid), `llm`/`judge`/`scenario`/`conversation` are **warn-only** unless you set `gate: true`.
 
 > **Path rule.** Every relative path and `file:` ref resolves against the **case file's own directory**, not the project root. With the layout above, a case in `tests/behavior/x.yaml` writes `file:../../prompts/…`, while one in `tests/captured.yaml` writes `file:../prompts/…`. Only `exec:` refs and `exec` layer `cwd:` resolve from the project root (where `heyllm.yaml` lives).
 >
@@ -287,6 +304,15 @@ cases:
     expect: { exitCode: 0 }
 ```
 
+**Browser / DOM checks without a browser dependency.** `parseStdout: true` parses the command's stdout as JSON, so a Playwright/Puppeteer script that drives the page and *prints what it saw* can be asserted with the same `json`/`jsonPath` matchers as every other layer — no browser bundled into heyllm, no new layer to learn:
+
+```yaml
+  - name: panel-visible-after-click
+    command: "node e2e/check-panel.mjs"      # drives the page, prints {"panelVisible": true, "items": 3}
+    parseStdout: true
+    expect: { json: { panelVisible: true, items: 3 } }
+```
+
 ### `http` — integration with save-chaining
 
 ```yaml
@@ -299,6 +325,53 @@ cases:
     request: { url: "{{BASE_URL}}/api/me", headers: { authorization: "Bearer {{token}}" } }
     expect: { status: 200 }
 ```
+
+### `scenario` — multi-turn integration against a real endpoint
+
+`http` sends one request. But conversational bugs live *across* turns: state that only goes wrong on turn 3, a closing line that contradicts turn 1, a reply the app misattributes a turn later. A `scenario` drives N user turns through a real conversational route, **threads the accumulated history back into each request**, and asserts what the endpoint returned after each turn — the real backend, the real prompt, the real post-processing, across the whole exchange. (Non-gated by default, like `llm`: it is real-model-backed.)
+
+```yaml
+kind: scenario
+cases:
+  - name: refund-flow-stays-coherent
+    request: { url: "{{BASE}}/api/chat", headers: { Cookie: "session={{TOKEN}}" } }
+    body: { locale: en }         # static fields merged into every turn's request body
+    userField: message           # where each turn's text goes           (default "message")
+    historyField: history        # request field the running history is sent as (null to omit)
+    historyContentKey: text      # key each history item uses for its text (default "content")
+    replyPath: data.reply        # where the assistant's text is, for the threaded history
+    turns:
+      - { user: "my order never arrived", expect: { status: 200, json: { data: { intent: support } } } }
+      - { user: "I'd like a refund",       expect: { json: { data: { action: open_refund } } } }
+      - { user: "thanks, that's all",      expect: { json: { data: { action: close } } } }
+```
+
+A wrong per-turn expectation fails with the turn index (`turn[2].json.data…`), so you see exactly where the conversation drifted. Turns can `save:` a value from one response into the next request's `{{var}}`.
+
+### `conversation` — drive a real multi-turn route, then judge the whole transcript
+
+A `scenario` asserts each turn deterministically (status, JSON shape, a regex). But some qualities only exist *across the whole exchange* — did it stay coherent, keep one persona, never contradict an earlier turn, answer in the user's language throughout? Those aren't a per-field check on one response; they're a judgement on the transcript. A `conversation` case drives the turns exactly like a `scenario` (same `request`/`turns`/history threading), then hands the rendered transcript to the **`judge`** machinery with a rubric — the multi-turn drive and the LLM-as-judge, composed.
+
+```yaml
+kind: conversation
+judge: claude-judge            # a judge provider (see the `judge` layer)
+threshold: 7                   # transcript must score ≥ 7 to pass
+cases:
+  - name: tutor-stays-in-the-learners-language
+    request: { url: "{{BASE}}/api/talk", headers: { Cookie: "session={{TOKEN}}" } }
+    replyPath: data.reply
+    rubric:
+      - { id: language,  question: "Does every assistant turn answer in the user's language?" }
+      - { id: coherent,  question: "Does the conversation stay coherent turn to turn, with no contradiction?" }
+    turns:
+      - { user: "안녕, 오늘 뭐 배울까?" }
+      - { user: "Case 8 배우고 싶어",  expect: { status: 200 } }   # per-turn deterministic checks still apply
+      - { user: "예시 하나만 더" }
+```
+
+A per-turn `expect` (or any 4xx/5xx) fails the case with the turn index **regardless of the score** — a broken turn is never rescued by a generous judge. The judge only runs on a transcript that drove cleanly. Everything the `judge` layer supports — `votes`, `scale`, `reliability`, `judgeParams` — applies here.
+
+> **`scenario` vs `conversation`.** Reach for `scenario` when the failure is a *specific field on a specific turn* (a status, an intent label, a saved token). Reach for `conversation` when the failure is a *property of the exchange* that no single-field assertion captures. They share the same drive; they differ only in what does the judging — a matcher vs. a model.
 
 ### `llm` — deterministic assertions on real model output
 
@@ -494,14 +567,14 @@ A wrong per-turn expectation fails with the turn index (`turn[1].dispatch.state`
 
 #### `responseSchema` — grade the shape you actually ship
 
-If your app forces the model into a JSON schema (Gemini `responseSchema` / OpenAI `json_schema`), reproduce that contract so the test grades the structured output — not freeform text the harness happened to get:
+If your app forces the model into a JSON schema (Gemini `responseSchema` / OpenAI `json_schema`, and on Anthropic emulated via a single forced tool), reproduce that contract so the test grades the structured output — not freeform text the harness happened to get:
 
 ```yaml
     params:
       responseSchema: { type: object, properties: { intent: { type: string } }, required: [intent] }
 ```
 
-Fold cases cache too: under `--changed-only`, a single-turn `dispatch` case **replays its UI outcome from the cached response at zero model cost** — the whole "response → UI" matrix re-verifies for free until a prompt actually changes.
+Fold cases cache too: under `--changed-only`, a `dispatch` case **replays its UI outcome from the cached response at zero model cost** — single-turn *and* multi-turn (the whole threaded conversation's per-turn fold is re-driven from cached turns). The entire "response → UI" matrix re-verifies for free until a prompt actually changes.
 
 ### `judge` — LLM-as-a-judge
 
@@ -837,18 +910,22 @@ heyllm init         scaffold a new project
 
 ```
 ◆ heyllm  7 pipelines  ·  gated pyramid: cheap → expensive, a failing gate halts the rest
-  last run  PASS  ·  34/36 cases  ·  9 cached  ·  2 unchanged  ·  1.3s  ·  3m ago
+  last run  FAIL  ·  33/36 cases  ·  9 cached  ·  ~816.0k tok  ·  1.3s  ·  3m ago
 
   ●  hygiene    static    gate   4 cases   ✓4                       44ms
   │
   ●  dispatch   dispatch  gate   9 cases   ✓9                       16ms
   │
-  ●  behavior   llm              11 cases  ✓9 ○2 ⋯9                 44.1s
+  ●  behavior   llm              11 cases  ✓9 ✗1 ⋯9        44.1s · ~816.0k tok
+  │     ↳ failed: modal-difference-grounds-on-base-case-8
+  │     ↳ flaky:  s22-situation-practice (flips across runs)
   │
   ●  quality    judge            3 cases   ✓1 ○2                    15.8s
 
   ✓ pass   ✗ fail   ○ skipped/unchanged   ⋯ cached replay   ⊘ halted   gate halts on fail
 ```
+
+It names the failed cases, flags any that flip across runs (flaky), and shows per-stage token spend — the triage info you'd otherwise scroll a full run log for. Flags: `--verbose` (tags + driver), `--only a,b` / `--tags t` (focus), `--watch` (live-refresh every 2s), `--json` (machine-readable, for CI badges). Per-stage age is shown when a filtered `--only` run refreshed only some stages, so the dashboard never implies a stale stage is fresh.
 
 ## Programmatic API
 

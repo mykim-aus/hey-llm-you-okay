@@ -23,7 +23,7 @@ import { censusSystemSources, formatSystemCensus } from "./inputs.js";
 import { loadLedger, runAxisSpread, sameEvidenceDifferentScore } from "./ledger.js";
 import { ConfigError, loadConfig, loadLayerCases, validateCases } from "./config.js";
 import { printSummary } from "./report/console.js";
-import { renderPipelines, type PipelineStage } from "./report/pipelines.js";
+import { renderPipelines, pipelinesJson, flakyFromHistory, type PipelineStage } from "./report/pipelines.js";
 import { writeJsonReport } from "./report/json.js";
 import { writeJunitReport } from "./report/junit.js";
 import { runSuite } from "./runner.js";
@@ -33,21 +33,64 @@ import { c } from "./util.js";
 
 /** The pipeline dashboard reads the last run from here (per-run, gitignored). */
 const LAST_RUN_FILE = ".heyllm/last-run.json";
+/** Rolling per-case verdict history — the dashboard reads it to flag flaky cases. */
+const RUN_HISTORY_FILE = ".heyllm/run-history.json";
+const HISTORY_DEPTH = 6;
+
+/** Append this run's per-case verdicts (pass/fail/inconclusive) to the rolling
+ *  history, so `heyllm pipelines` can flag a case that flips across runs — the
+ *  flakiness a single run can never show. Skipped/unchanged cases are NOT a
+ *  fresh verdict, so they are not recorded. */
+async function persistRunHistory(baseDir: string, summary: RunSummary): Promise<void> {
+  try {
+    const file = path.join(baseDir, RUN_HISTORY_FILE);
+    let hist: { stages: Record<string, Record<string, string[]>> } = { stages: {} };
+    try {
+      hist = JSON.parse(readFileSync(file, "utf8"));
+    } catch {}
+    if (!hist.stages) hist.stages = {};
+    for (const l of summary.layers) {
+      const stage = (hist.stages[l.name] ??= {});
+      for (const r of l.cases) {
+        if (r.result.skipped) continue; // not a fresh verdict
+        const verdict = r.result.inconclusive ? "inconclusive" : r.result.ok ? "pass" : "fail";
+        const arr = (stage[r.name] ??= []);
+        arr.push(verdict);
+        if (arr.length > HISTORY_DEPTH) arr.splice(0, arr.length - HISTORY_DEPTH);
+      }
+    }
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, JSON.stringify(hist, null, 2));
+  } catch {
+    /* history is best-effort — never break a run */
+  }
+}
 
 /** Persist the run for `heyllm pipelines`, MERGING per-stage so a filtered
  *  (--only) run updates just those stages and keeps the rest's last result. */
 async function persistLastRun(baseDir: string, summary: RunSummary): Promise<void> {
   try {
     const file = path.join(baseDir, LAST_RUN_FILE);
+    const nowIso = new Date().toISOString();
     let merged = summary;
+    // Per-stage timestamps: this run's stages ran now; kept stages keep their
+    // prior time. Lets the dashboard show honest per-stage age when a filtered
+    // (--only) run refreshed only some pipelines.
+    const stageRanAt: Record<string, string> = {};
+    for (const l of summary.layers) stageRanAt[l.name] = nowIso;
     try {
-      const prior = JSON.parse(readFileSync(file, "utf8")).summary as RunSummary;
+      const priorRaw = JSON.parse(readFileSync(file, "utf8"));
+      const prior = priorRaw.summary as RunSummary;
       const now = new Set(summary.layers.map((l) => l.name));
       const kept = prior.layers.filter((l) => !now.has(l.name));
       if (kept.length) merged = { ...summary, layers: [...summary.layers, ...kept] };
+      for (const l of kept) {
+        const t = priorRaw.stageRanAt?.[l.name];
+        if (t) stageRanAt[l.name] = t;
+      }
     } catch {}
     await mkdir(path.dirname(file), { recursive: true });
-    await writeFile(file, JSON.stringify({ at: new Date().toISOString(), summary: merged }, null, 2));
+    await writeFile(file, JSON.stringify({ at: nowIso, summary: merged, stageRanAt }, null, 2));
   } catch {
     /* a dashboard cache write must never break a run */
   }
@@ -75,6 +118,8 @@ const BOOL_FLAGS = new Set([
   "no-color",
   "dry-run",
   "skip-invalid",
+  "json",
+  "watch",
 ]);
 
 /** Flags that REQUIRE a value — a bare `--grep` must error, never silently
@@ -91,6 +136,7 @@ const VALUE_FLAGS = new Set([
   "note",
   "layer",
   "max-spread",
+  "max-spend",
   "map",
   "source-name",
   "out",
@@ -181,6 +227,17 @@ async function cmdRun(argv: Argv, forceTriage = false): Promise<number> {
       return 2;
     }
   }
+  // --max-spend: a malformed value (empty from an unset CI var, non-numeric, 0)
+  // must NOT silently disable the guard — Number("")===0 / Number("x")===NaN both
+  // make the budget fail open. Reject them loudly.
+  let maxSpend: number | undefined;
+  if (argv.flags["max-spend"] !== undefined) {
+    maxSpend = Number(argv.flags["max-spend"]);
+    if (!Number.isFinite(maxSpend) || maxSpend <= 0) {
+      console.error(c.red(`--max-spend must be a positive number of tokens, got '${argv.flags["max-spend"]}'`));
+      return 2;
+    }
+  }
   const summary = await runSuite(config, {
     only,
     grep: argv.flags.grep as string,
@@ -190,10 +247,12 @@ async function cmdRun(argv: Argv, forceTriage = false): Promise<number> {
     triage: forceTriage || !!argv.flags.triage,
     changedOnly: !!argv.flags["changed-only"],
     always,
+    maxSpend,
     log: (line) => console.log(c.dim(`· ${line}`)),
   });
   printSummary(summary, !!argv.flags.verbose);
   await persistLastRun(config.baseDir, summary);
+  await persistRunHistory(config.baseDir, summary);
 
   const kind = argv.flags.report as string | undefined;
   if (kind) {
@@ -278,32 +337,92 @@ async function cmdValidate(argv: Argv): Promise<number> {
  */
 async function cmdPipelines(argv: Argv): Promise<number> {
   const config = await loadConfig(argv.flags.config as string, { profile: argv.flags.profile as string });
-  const stages: PipelineStage[] = [];
+  const only = list(argv.flags.only);
+  const tagFilter = list(argv.flags.tags);
+  const allStages: PipelineStage[] = [];
   for (const layer of config.layers) {
     const groups = await loadLayerCases(layer, config.baseDir, config.settings?.capture?.file);
     const cases = groups.flatMap((g) => g.cases);
     const tags = [...new Set(cases.flatMap((cs) => (Array.isArray(cs.tags) ? cs.tags : [])))];
-    const driver =
-      layer.kind === "judge"
-        ? [layer.subject, layer.judge].filter(Boolean).join(" → ")
-        : layer.provider;
-    stages.push({ name: layer.name, kind: layer.kind, gate: layer.gate, count: cases.length, tags, driver });
+    const driver = layer.kind === "judge" ? [layer.subject, layer.judge].filter(Boolean).join(" → ") : layer.provider;
+    allStages.push({ name: layer.name, kind: layer.kind, gate: layer.gate, count: cases.length, tags, driver });
+  }
+  const stages = allStages.filter(
+    (s) => (!only || only.includes(s.name)) && (!tagFilter || s.tags.some((t) => tagFilter.includes(t)))
+  );
+  if (!stages.length) {
+    console.error(c.red("no pipelines matched the given --only/--tags"));
+    return 2;
   }
 
-  let summary: RunSummary | null = null;
-  let ageMs: number | undefined;
-  try {
-    const raw = JSON.parse(readFileSync(path.join(config.baseDir, LAST_RUN_FILE), "utf8"));
-    summary = raw.summary as RunSummary;
-    if (raw.at) ageMs = Date.now() - new Date(raw.at).getTime();
-  } catch {
-    /* no last run yet — the dashboard says so */
+  const gather = () => {
+    let summary: RunSummary | null = null;
+    let ageMs: number | undefined;
+    const stageAgeMs: Record<string, number> = {};
+    try {
+      const raw = JSON.parse(readFileSync(path.join(config.baseDir, LAST_RUN_FILE), "utf8"));
+      summary = raw.summary as RunSummary;
+      if (raw.at) ageMs = Date.now() - new Date(raw.at).getTime();
+      for (const [name, iso] of Object.entries(raw.stageRanAt || {}))
+        stageAgeMs[name] = Date.now() - new Date(iso as string).getTime();
+    } catch {
+      /* no last run yet — the dashboard says so */
+    }
+    return { summary, ageMs, stageAgeMs, flaky: readFlaky(config.baseDir, stages.map((s) => s.name)) };
+  };
+
+  const opts = () => {
+    const g = gather();
+    return { verbose: !!argv.flags.verbose, ageMs: g.ageMs, stageAgeMs: g.stageAgeMs, flaky: g.flaky, summary: g.summary };
+  };
+
+  if (argv.flags.json) {
+    const g = gather();
+    console.log(JSON.stringify(pipelinesJson(stages, g.summary, { ageMs: g.ageMs, stageAgeMs: g.stageAgeMs, flaky: g.flaky }), null, 2));
+    return 0;
+  }
+
+  const render = () => {
+    const o = opts();
+    const lines = renderPipelines(stages, o.summary, { verbose: o.verbose, ageMs: o.ageMs, stageAgeMs: o.stageAgeMs, flaky: o.flaky });
+    return lines;
+  };
+
+  if (argv.flags.watch) {
+    // live dashboard: clear + re-render on an interval until Ctrl-C. Re-reads the
+    // last-run file each tick, so another shell running `heyllm run` updates it.
+    const tick = () => {
+      process.stdout.write("\x1b[2J\x1b[H"); // clear + home
+      console.log("");
+      for (const line of render()) console.log(line);
+      console.log(c.dim("\n  watching — Ctrl-C to exit"));
+    };
+    tick();
+    const timer = setInterval(tick, 2000);
+    await new Promise<void>((resolve) => {
+      process.on("SIGINT", () => {
+        clearInterval(timer);
+        resolve();
+      });
+    });
+    return 0;
   }
 
   console.log("");
-  for (const line of renderPipelines(stages, summary, { verbose: !!argv.flags.verbose, ageMs })) console.log(line);
+  for (const line of render()) console.log(line);
   console.log("");
   return 0;
+}
+
+/** Flaky case names per stage — cases that FLIPPED pass↔fail across recent runs
+ *  (from the run-history store the runner appends). Absent history ⇒ none. */
+function readFlaky(baseDir: string, stageNames: string[]): Record<string, string[]> {
+  try {
+    const hist = JSON.parse(readFileSync(path.join(baseDir, RUN_HISTORY_FILE), "utf8"));
+    return flakyFromHistory(hist, stageNames);
+  } catch {
+    return {};
+  }
 }
 
 /**
@@ -547,7 +666,7 @@ async function cmdInit(): Promise<number> {
     // baseline.json is a reviewed artifact and travels with the prompt change.
     // ledger.json is a per-run observation log — committing it conflicts on
     // every branch and tells reviewers nothing.
-    [".heyllm/.gitignore", "ledger.json\nprompts.json\nlast-run.json\n"],
+    [".heyllm/.gitignore", "ledger.json\nprompts.json\nlast-run.json\nrun-history.json\n"],
     ["heyllm.yaml", INIT_CONFIG],
     ["tests/static/sanity.yaml", INIT_STATIC],
     ["tests/behavior/basics.yaml", INIT_BEHAVIOR],
@@ -594,8 +713,14 @@ common flags:
                        tools + params + model) is unchanged since their last run
   --always a,b         layers that run every time even under --changed-only
                        (canaries — catch model drift a payload hash cannot)
+  --max-spend N        soft token budget: skip remaining paid cases once N
+                       input+output tokens are spent (guard a runaway sweep)
   --report json|junit  write a machine-readable report
-  --verbose            per-case timing + judge vote reasoning`);
+  --verbose            per-case timing + judge vote reasoning
+
+pipelines flags:
+  --json               machine-readable dashboard    --watch  live-refresh
+  --only a,b --tags t  focus on some pipelines        --verbose  tags + driver`);
   return 0;
 }
 

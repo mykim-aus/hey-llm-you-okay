@@ -66,7 +66,13 @@ export function anthropic(cfg: ProviderConfig, name: string) {
       // could not parse, which reads as a model failure rather than an
       // unsupported option. Skipped when tools are in play: a tool-use turn
       // legitimately returns no text at all.
-      const wantsJson = !!req.json && !req.tools?.length;
+      // Structured output: the Messages API has no responseSchema, so we emulate
+      // it with a single forced tool whose input_schema IS the schema — the model
+      // must "call" it, and its input is the structured answer (surfaced as JSON
+      // text, so json/jsonPath assertions behave the same as on gemini/openai).
+      // Skipped when the case already uses functional tools (can't force both).
+      const wantsSchema = !!req.responseSchema && !req.tools?.length;
+      const wantsJson = !!req.json && !req.tools?.length && !wantsSchema;
       const jsonRule =
         "Respond with a single raw JSON value and nothing else. " +
         "No prose, no explanation, and no markdown code fences.";
@@ -83,6 +89,12 @@ export function anthropic(cfg: ProviderConfig, name: string) {
           description: t.description,
           input_schema: t.parameters || { type: "object", properties: {} },
         }));
+      if (wantsSchema) {
+        body.tools = [
+          { name: "emit_json", description: "Return the answer as a single JSON value matching the schema.", input_schema: req.responseSchema },
+        ];
+        body.tool_choice = { type: "tool", name: "emit_json" };
+      }
 
       const out = await postJson(`${base}/v1/messages`, {
         headers: {
@@ -99,6 +111,16 @@ export function anthropic(cfg: ProviderConfig, name: string) {
         if (block.type === "text") text += block.text;
         else if (block.type === "tool_use")
           toolCalls.push({ id: block.id, name: block.name, args: block.input || {} });
+      }
+      // The forced emit_json tool call's input IS the structured answer — surface
+      // it as JSON text and drop the tool call (an emulation artifact, not a tool
+      // the app decided to call).
+      if (wantsSchema) {
+        const emit = toolCalls.find((tc) => tc.name === "emit_json");
+        if (emit) {
+          text = JSON.stringify(emit.args);
+          toolCalls.length = 0;
+        }
       }
       // Models still fence JSON often enough that instruction alone is not a
       // contract. Unwrapping here means `json: true` behaves the same on every

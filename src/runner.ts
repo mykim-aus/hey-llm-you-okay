@@ -18,6 +18,8 @@ import { runLlmCase } from "./layers/llm.js";
 import { runJudgeCase } from "./layers/judge.js";
 import { runDispatchCase } from "./layers/dispatch.js";
 import { runChainCase } from "./layers/chain.js";
+import { runScenarioCase } from "./layers/scenario.js";
+import { runConversationCase } from "./layers/conversation.js";
 import {
   caseKey,
   checkRegression,
@@ -53,6 +55,8 @@ const RUNNERS: Record<LayerKind, (cs: CaseDef, ctx: CaseCtx) => Promise<CaseResu
   judge: runJudgeCase,
   dispatch: runDispatchCase,
   chain: runChainCase,
+  scenario: runScenarioCase,
+  conversation: runConversationCase,
 };
 
 // http defaults to 1 (save-chaining is sequential); llm/judge stay low for rate limits
@@ -64,6 +68,8 @@ const DEFAULT_CONCURRENCY: Record<LayerKind, number> = {
   llm: 2,
   judge: 2,
   chain: 1,
+  scenario: 1, // each scenario is sequential internally; keep cases sequential too (shared endpoint state)
+  conversation: 1,
 };
 
 export interface RunOptions {
@@ -77,6 +83,10 @@ export interface RunOptions {
   changedOnly?: boolean;
   /** layer names that must run every time even under --changed-only (canaries) */
   always?: string[];
+  /** --max-spend: soft token budget. Once cumulative input+output tokens reach
+   *  it, remaining paid (llm/judge) cases are skipped instead of run — a guard
+   *  against a runaway paid sweep. Deterministic layers are never skipped. */
+  maxSpend?: number;
   log?: (line: string) => void;
   /** live progress callback for reporters */
   onCase?: (layer: LayerConfig, record: CaseRunRecord) => void;
@@ -121,6 +131,7 @@ export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Pro
   const alwaysSet = new Set(opts.always || []);
   const maxDrop = config.settings.maxDrop ?? 1;
   let gateBroken = false;
+  let budgetHit = false; // --max-spend: once true, remaining paid cases are skipped
 
   const makeCtx = (
     layer: LayerConfig,
@@ -180,7 +191,13 @@ export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Pro
     // running without that profile has to say so, not crash on `undefined.chat`
     // and not quietly pass.
     const providerRefs = (
-      layer.kind === "llm" ? [layer.provider] : layer.kind === "judge" ? [layer.subject, layer.judge] : []
+      layer.kind === "llm"
+        ? [layer.provider]
+        : layer.kind === "judge"
+          ? [layer.subject, layer.judge]
+          : layer.kind === "conversation"
+            ? [layer.judge] // drives an HTTP endpoint, judges the transcript with `judge:`
+            : []
     ).filter(Boolean) as string[];
     const absent = providerRefs.filter((r) => !providers[r]);
     if (absent.length) {
@@ -229,8 +246,25 @@ export async function runSuite(config: HeyLLMConfig, opts: RunOptions = {}): Pro
     const records = await pool(selected, concurrency, async ({ def, file, baseDir }) => {
       const caseStarted = Date.now();
       let result: CaseResult;
+      const spent = () => {
+        const u = summarizeUsage(meter.all());
+        // totalTokens accumulates BOTH split (in+out) and unsplit total-only usage,
+        // so a provider that reports only a combined total still counts against the
+        // budget (input/output stay 0 for those — the guard must not fail open).
+        return Math.max((u.inputTokens || 0) + (u.outputTokens || 0), u.totalTokens || 0);
+      };
       if (def.skip) {
         result = { ok: true, failures: [], skipped: typeof def.skip === "string" ? def.skip : "skipped" };
+      } else if (
+        opts.maxSpend !== undefined &&
+        (layer.kind === "llm" || layer.kind === "judge") &&
+        spent() >= opts.maxSpend
+      ) {
+        // over the token budget — skip remaining paid cases (a soft cap: cases
+        // already in flight under concurrency may still finish).
+        if (!budgetHit) log(`--max-spend budget reached (${spent()} ≥ ${opts.maxSpend} tokens) — skipping remaining paid cases`);
+        budgetHit = true;
+        result = { ok: true, failures: [], skipped: `over --max-spend budget (${opts.maxSpend} tokens) — not run` };
       } else {
         const ctx = makeCtx(layer, baseDir, saved, { case: def.name });
         try {
