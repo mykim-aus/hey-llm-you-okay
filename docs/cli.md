@@ -6,6 +6,7 @@ See also: [config.md](config.md) · [layers.md](layers.md) · [why.md](why.md).
 
 ```
 heyllm run          run the pyramid          --only a,b --grep re --tags t1,t2
+heyllm list         catalog: every case's name + description + tags — no runs, no model calls
 heyllm pipelines    dashboard: what exists, how it flows, last-run results   --verbose
 heyllm ingest       bulk-import a JSONL export  --map input=<path> --dedup near --dry-run
 heyllm triage       run + A/B probe          --update-baseline --keep-going
@@ -15,9 +16,43 @@ heyllm doctor       judge reliability from the ledger — zero model calls
 heyllm init         scaffold a new project
 ```
 
+### `heyllm list` — the catalog (what each case verifies)
+
+Alias `ls`, `cases`. Give each case a one-line `description:` and the intent stops living in a YAML
+comment nobody reads:
+
+```yaml
+cases:
+  - name: closing-does-not-credit-learner-with-my-correction
+    description: the tutor must not praise the learner for a correction the tutor itself supplied
+    tags: [tutor, attribution]
+    ...
+```
+
+`heyllm list` then prints the whole suite as a catalog — every pipeline, every case's name +
+description + tags — with **no run and no model calls**. It's the "what do we actually check?" map
+that a pass/fail dashboard can't give:
+
+```
+◆ heyllm  12 pipelines · 86 cases      catalog · no runs, no model calls
+
+●  behavior  llm · gemini  12 cases
+     closing-does-not-credit-learner-with-my-correction
+       the tutor must not praise the learner for a correction the tutor itself supplied
+       #tutor #attribution
+     ...
+
+7/86 cases have no description — add `description:` in the YAML so the catalog reads at a glance.
+```
+
+`description` is free-form metadata: surfaced here, ignored by execution (a non-string is a `validate`
+error). An undescribed case is counted out loud, so the catalog can't quietly imply coverage it
+doesn't explain. Flags: `--only a,b` (pipelines) / `--tags t` (cases carrying a tag) / `--grep re`
+(case names) focus it; `--json` is machine-readable.
+
 ### `heyllm pipelines` — zero-cost dashboard
 
-Aliases `status`, `ls`. Reads the config and the last run, no model calls. See every pipeline, the
+Alias `status`. Reads the config and the last run, no model calls. See every pipeline, the
 gated pyramid it flows through, and how each stage did last time, at a glance:
 
 ```
