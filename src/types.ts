@@ -128,7 +128,7 @@ export interface ProviderConfig {
   cwd?: string;
 }
 
-export type LayerKind = "static" | "exec" | "http" | "llm" | "judge" | "dispatch";
+export type LayerKind = "static" | "exec" | "http" | "llm" | "judge" | "dispatch" | "chain";
 
 export interface Scale {
   min: number;

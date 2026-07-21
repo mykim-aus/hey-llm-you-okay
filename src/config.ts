@@ -20,7 +20,7 @@ import { INPUTS_SYSTEM_MODES, lintInputsContract } from "./inputs.js";
 import { checkDispatchMode } from "./layers/dispatch.js";
 import type { CaseDef, HeyLLMConfig, LayerConfig, LayerKind, ProviderConfig, ProviderKind } from "./types.js";
 
-export const LAYER_KINDS: LayerKind[] = ["static", "exec", "http", "llm", "judge", "dispatch"];
+export const LAYER_KINDS: LayerKind[] = ["static", "exec", "http", "llm", "judge", "dispatch", "chain"];
 export const PROVIDER_KINDS: ProviderKind[] = ["openai-compatible", "anthropic", "gemini", "command"];
 
 export class ConfigError extends Error {}
@@ -244,6 +244,7 @@ const KIND_KEYS: Record<string, string[]> = {
   llm: ["system", "prompt", "messages", "conversation", "tools", "toolResponses", "params", "maxRounds", "repeat", "passRate", "dispatch"],
   judge: ["input", "output", "transcript", "context", "rubric", "scale", "votes", "threshold", "minScores", "judgeParams", "reliability"],
   dispatch: ["module", "export", "command", "args", "cwd", "env", "timeoutMs", "initialState", "calls"],
+  chain: ["input", "stages", "cwd", "timeoutMs"],
 };
 
 /**
