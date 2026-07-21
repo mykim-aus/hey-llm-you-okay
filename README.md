@@ -5,6 +5,8 @@
 
 That is the failure this tool is built around. Your LLM tests can be green for reasons that have nothing to do with whether the thing you ship works — the prompt drifted from production, the provider changed the model under you, the model called the right tool and your app still did nothing. **heyllm** is a single-YAML testing CLI whose whole design is aimed at one question: **when a test is green, was anything actually verified — and when it's red, whose fault is it?**
 
+> **In production use — dogfooded, not a demo.** heyllm is the pre-deploy gate for **smoveth**, my live English-learning app: a hands-free voice tutor over Gemini Live, 14 languages, 16 tools, on a Next.js backend where the model's replies are *routed* through a real RAG → DB → UI-reducer chain. heyllm runs against that real backend before every deploy (`npm run verify`, ~70s, 27 checks across 7 layers). The opening story, the [case study](CASE-STUDY.md), and most numbers below are its actual findings there — not a toy fixture.
+
 The sharpest answer is `heyllm triage`. When an AI test fails, it re-runs the failing case against **both your current inputs and the last-passing snapshot** under today's model, and tells you the cause instead of leaving you to guess:
 
 ```
@@ -48,7 +50,7 @@ $ heyllm triage
 
 ## Does it find real bugs? And does it hold *itself* to this bar?
 
-The first production project to adopt it — a hands-free voice assistant, 16 tools, 96 green test files — surfaced three shipped bugs in a day: a suite testing a prompt production never sent, an app that suppressed a visual then told the model it hadn't, and a whole conversation mode answering in the wrong language across 13 locales. Every one was invisible for the same reason — the tests were pointed at the wrong artifact — and that is exactly the class of failure heyllm is built to make visible. The [case study](CASE-STUDY.md) walks through all three.
+The app it was built against — **smoveth**, my own production English-learning app (hands-free voice tutor, 16 tools) — had **96 green test files** and still shipped three bugs in a day: a suite testing a prompt production never sent, an app that suppressed a visual then told the model it hadn't, and a whole conversation mode answering in the wrong language across 13 locales. Every one was invisible for the same reason — the tests were pointed at the wrong artifact — and that is exactly the class of failure heyllm is built to make visible. The [case study](CASE-STUDY.md) walks through all three. Later it caught a fourth: a grammar question that grounded to the wrong lesson because the model passed a made-up sentence a retriever then mis-matched — the kind of *which-stage-decided-wrong* bug the `chain` layer now attributes automatically.
 
 An eval tool that is itself flaky is worth less than nothing, so heyllm is held to its own bar. It **tests itself** (`heyllm run` gates its own build), ships an offline end-to-end demo, and was put through an **adversarial audit that found six of its own silent-green paths** — a triage verdict stated too confidently, a probe that ignored a reducer's exit code, a metering rollup that double-counted a string — each fixed with a regression before release.
 
