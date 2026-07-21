@@ -233,7 +233,7 @@ export async function loadLayerCases(
 // `input`/`context` by judge, `note`/`capturedAt` are already here — a flat
 // id/url would collide the moment a new kind wants those names. One nested key
 // verified absent from every KIND_KEYS list costs a single COMMON entry.
-const COMMON_KEYS = ["name", "tags", "skip", "note", "capturedAt", "expect", "source", "fingerprintIgnore", "maxCacheAgeDays"];
+const COMMON_KEYS = ["name", "description", "tags", "skip", "note", "capturedAt", "expect", "source", "fingerprintIgnore", "maxCacheAgeDays"];
 // The file-mode static keys — mutually exclusive with `compare:`.
 const STATIC_FILE_KEYS = ["file", "files", "mustExist", "forbid", "require", "jsonValid", "yamlValid", "maxBytes"];
 
@@ -307,6 +307,10 @@ export function validateCases(layer: LayerConfig, groups: CaseGroup[]): string[]
         if (layer.kind === "judge" && !cs.rubric)
           need(false, g.file, cs, `ingested judge case has no 'rubric' — add one or keep skip:`);
       }
+      // description is metadata for `heyllm list` — free-form, but must be a
+      // string (a stray mapping/list here is a YAML indentation slip, not a note).
+      if (cs.description !== undefined && typeof cs.description !== "string")
+        need(false, g.file, cs, `'description' must be a string (one-line summary for \`heyllm list\`), got ${Array.isArray(cs.description) ? "a list" : typeof cs.description}`);
       for (const key of Object.keys(cs))
         if (!allowed.has(key))
           problems.push(

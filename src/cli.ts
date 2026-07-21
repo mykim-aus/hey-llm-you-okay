@@ -24,6 +24,7 @@ import { loadLedger, runAxisSpread, sameEvidenceDifferentScore } from "./ledger.
 import { ConfigError, loadConfig, loadLayerCases, validateCases } from "./config.js";
 import { printSummary } from "./report/console.js";
 import { renderPipelines, pipelinesJson, flakyFromHistory, type PipelineStage } from "./report/pipelines.js";
+import { renderCatalog, catalogJson, type CatalogPipeline } from "./report/catalog.js";
 import { writeJsonReport } from "./report/json.js";
 import { writeJunitReport } from "./report/junit.js";
 import { runSuite } from "./runner.js";
@@ -414,6 +415,52 @@ async function cmdPipelines(argv: Argv): Promise<number> {
   return 0;
 }
 
+/**
+ * `heyllm list` — the pipeline CATALOG. Lists every case's name + one-line
+ * `description:` + tags, grouped by pipeline. No run, no model calls: this is
+ * the "what does this suite cover?" map that the run-results dashboard
+ * (`pipelines`) does not give. --only filters pipelines by name; --tags keeps
+ * only cases carrying a tag; --grep filters case names; --json emits it machine-
+ * readable.
+ */
+async function cmdList(argv: Argv): Promise<number> {
+  const config = await loadConfig(argv.flags.config as string, { profile: argv.flags.profile as string });
+  const only = list(argv.flags.only);
+  const tagFilter = list(argv.flags.tags);
+  const grep = typeof argv.flags.grep === "string" ? new RegExp(argv.flags.grep as string, "i") : null;
+
+  const pipelines: CatalogPipeline[] = [];
+  for (const layer of config.layers) {
+    if (only && !only.includes(layer.name)) continue;
+    const groups = await loadLayerCases(layer, config.baseDir, config.settings?.capture?.file);
+    const driver = layer.kind === "judge" ? [layer.subject, layer.judge].filter(Boolean).join(" → ") : layer.provider;
+    let cases = groups.flatMap((g) => g.cases).map((cs) => ({
+      name: cs.name,
+      description: typeof cs.description === "string" ? cs.description : undefined,
+      tags: Array.isArray(cs.tags) ? cs.tags : [],
+      skip: cs.skip,
+    }));
+    if (tagFilter) cases = cases.filter((cs) => cs.tags.some((t) => tagFilter.includes(t)));
+    if (grep) cases = cases.filter((cs) => grep.test(cs.name));
+    // A pipeline emptied by the filter is dropped — the catalog shows only what
+    // matched, never an empty stub that reads as "0 cases here".
+    if (only || tagFilter || grep ? cases.length : true)
+      pipelines.push({ name: layer.name, kind: layer.kind, gate: layer.gate, driver, cases });
+  }
+  if (!pipelines.length) {
+    console.error(c.red("no cases matched the given --only/--tags/--grep"));
+    return 2;
+  }
+  if (argv.flags.json) {
+    console.log(JSON.stringify(catalogJson(pipelines), null, 2));
+    return 0;
+  }
+  console.log("");
+  for (const line of renderCatalog(pipelines, { verbose: !!argv.flags.verbose })) console.log(line);
+  console.log("");
+  return 0;
+}
+
 /** Flaky case names per stage — cases that FLIPPED pass↔fail across recent runs
  *  (from the run-history store the runner appends). Absent history ⇒ none. */
 function readFlaky(baseDir: string, stageNames: string[]): Record<string, string[]> {
@@ -692,6 +739,7 @@ function help(): number {
 
 commands:
   run        run the layer pyramid (cheap → expensive, gated halt)
+  list       catalog: every case's name + description + tags, per pipeline (no runs, no model calls)
   pipelines  dashboard: what pipelines exist, how they flow, last-run results (no model calls)
   triage     run, then A/B-probe every AI failure (flaky | your-change | model-drift)
   validate   lint config + case files without executing
@@ -720,7 +768,12 @@ common flags:
 
 pipelines flags:
   --json               machine-readable dashboard    --watch  live-refresh
-  --only a,b --tags t  focus on some pipelines        --verbose  tags + driver`);
+  --only a,b --tags t  focus on some pipelines        --verbose  tags + driver
+
+list flags:
+  --json               machine-readable catalog
+  --only a,b           only these pipelines           --grep <re>  cases by name
+  --tags a,b           only cases carrying a tag`);
   return 0;
 }
 
@@ -752,8 +805,11 @@ export async function main(argv: string[]): Promise<number> {
         return await cmdValidate(parsed);
       case "pipelines":
       case "status":
-      case "ls":
         return await cmdPipelines(parsed);
+      case "list":
+      case "ls":
+      case "cases":
+        return await cmdList(parsed);
       case "capture":
         return await cmdCapture(parsed);
       case "ingest":

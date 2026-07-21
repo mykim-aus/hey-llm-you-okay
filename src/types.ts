@@ -210,6 +210,10 @@ export interface DispatchSpec {
 /** A case is YAML-authored; `name` is the only universally required field. */
 export type CaseDef = Record<string, any> & {
   name: string;
+  /** one-line human summary of what this case verifies — surfaced by `heyllm
+   *  list`, ignored by execution. The intent that used to live in a YAML comment,
+   *  promoted to a field a catalog can show. */
+  description?: string;
   tags?: string[];
   /** true, or a reason string shown as the skip note (ingested stubs use this) */
   skip?: boolean | string;

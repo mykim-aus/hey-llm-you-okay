@@ -131,6 +131,38 @@ layers:                              # executes top-to-bottom: CHEAP FIRST
 the unchanged cases from cache at zero tokens. Full config reference, matchers, and the
 prompt-regression workflow → **[docs/config.md](docs/config.md)**.
 
+## What does this suite even cover? — `heyllm list`
+
+Give each case a one-line `description:` and the intent stops living in a YAML comment nobody reads:
+
+```yaml
+cases:
+  - name: closing-does-not-credit-learner-with-my-correction
+    description: the tutor must not praise the learner for a correction the tutor itself supplied
+    tags: [tutor, attribution]
+    ...
+```
+
+`heyllm list` then prints the whole suite as a catalog — every pipeline, every case name + description +
+tags — with **no run and no model calls**. It's the "what do we actually check?" map that a
+pass/fail dashboard can't give:
+
+```
+◆ heyllm  12 pipelines · 86 cases      catalog · no runs, no model calls
+
+●  behavior  llm · gemini  12 cases
+     closing-does-not-credit-learner-with-my-correction
+       the tutor must not praise the learner for a correction the tutor itself supplied
+       #tutor #attribution
+     ...
+
+7/86 cases have no description — add `description:` in the YAML so the catalog reads at a glance.
+```
+
+`--only`/`--tags`/`--grep` focus it; `--json` makes it machine-readable. And because an undescribed
+case is counted out loud, the catalog can't quietly imply coverage it doesn't explain. (`heyllm
+pipelines` is the sibling view — same pipelines, but last-*run results* instead of intent.)
+
 ## Migrating an existing suite with an AI agent
 
 heyllm ships an agent-facing spec, **[AGENTS.md](AGENTS.md)** — a condensed, validator-checked

@@ -49,8 +49,10 @@ or an inline `cases:` list. Common layer keys: `gate`, `env` (declared env vars)
 
 ## 3. Layer kinds — one minimal case each
 
-Every case needs a `name`. Common optional keys on any case: `tags`, `skip`,
-`note`, `expect`, `fingerprintIgnore`, `maxCacheAgeDays`.
+Every case needs a `name`. Give each a one-line `description:` too — a plain
+statement of what it verifies (it shows up in `heyllm list`, the no-run catalog,
+and is ignored by execution). Other common optional keys on any case: `tags`,
+`skip`, `note`, `expect`, `fingerprintIgnore`, `maxCacheAgeDays`.
 
 **static** — file hygiene, no model. Needs `file` | `files` | `compare`.
 
