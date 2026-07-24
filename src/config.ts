@@ -12,7 +12,9 @@
  * expensive layers are not burned.
  */
 import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 import { envFileVars, glob, isPlainObject, loadEnvFile } from "./util.js";
 import { normalizeCompareSpec } from "./compare.js";
@@ -31,6 +33,25 @@ function err(msg: string): never {
 
 const suggest = (value: unknown, valid: string[]) =>
   `'${value}' is not valid — expected one of: ${valid.join(", ")}`;
+
+/** Installed CLI version, for error messages (same source as cli.ts --version). */
+function installedVersion(): string {
+  try {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    return JSON.parse(readFileSync(path.join(here, "../package.json"), "utf8")).version;
+  } catch {
+    return "unknown";
+  }
+}
+
+/** An unknown KIND is the canonical "this config was written for a newer heyllm"
+ *  signal — a project that upgrades its heyllm.yaml (e.g. adds a `scenario`
+ *  layer) while node_modules still holds an older install gets a bare enum
+ *  error that reads like a typo. Measured on a real project: the stale install
+ *  masked a broken layer for days because nothing pointed at the version.
+ *  Name the installed version and the likely fix. */
+const suggestKind = (value: unknown, valid: string[]) =>
+  `${suggest(value, valid)}\n  (installed heyllm ${installedVersion()} — if this kind comes from a newer heyllm, upgrade: npm i -D hey-llm-you-okay@latest)`;
 
 export async function loadConfig(
   configPath?: string,
@@ -77,7 +98,7 @@ export async function loadConfig(
 
   for (const [name, p] of Object.entries(providers)) {
     if (!isPlainObject(p)) err(`providers.${name}: must be a mapping`);
-    if (!PROVIDER_KINDS.includes(p.kind)) err(`providers.${name}.kind: ${suggest(p.kind, PROVIDER_KINDS)}`);
+    if (!PROVIDER_KINDS.includes(p.kind)) err(`providers.${name}.kind: ${suggestKind(p.kind, PROVIDER_KINDS)}`);
     if (p.kind === "command" && !p.command) err(`providers.${name}: kind 'command' requires 'command'`);
     if (p.kind !== "command" && !p.model) err(`providers.${name}: kind '${p.kind}' requires 'model'`);
     if ((p as any).apiKey)
@@ -95,7 +116,7 @@ export async function loadConfig(
     if (!l.name) err(`${at}: 'name' is required`);
     if (seen.has(l.name)) err(`${at}: duplicate layer name '${l.name}'`);
     seen.add(l.name);
-    if (!LAYER_KINDS.includes(l.kind)) err(`${at}.kind: ${suggest(l.kind, LAYER_KINDS)}`);
+    if (!LAYER_KINDS.includes(l.kind)) err(`${at}.kind: ${suggestKind(l.kind, LAYER_KINDS)}`);
     if (!l.include && !l.cases) err(`${at} (${l.name}): needs 'include' globs or inline 'cases'`);
     const needsProvider: string[] =
       ({ llm: ["provider"], judge: ["subject", "judge"] } as Record<string, string[]>)[l.kind] || [];
@@ -239,7 +260,10 @@ const STATIC_FILE_KEYS = ["file", "files", "mustExist", "forbid", "require", "js
 
 const KIND_KEYS: Record<string, string[]> = {
   static: ["file", "files", "mustExist", "forbid", "require", "jsonValid", "yamlValid", "maxBytes", "compare"],
-  exec: ["command", "cwd", "env", "timeoutMs", "parseStdout"],
+  // `fingerprint`: cheap probe command whose output stands in for the payload
+  // fingerprint under --changed-only (see layers/exec.ts) — pairs with the
+  // COMMON `fingerprintIgnore`/`maxCacheAgeDays`.
+  exec: ["command", "cwd", "env", "timeoutMs", "parseStdout", "fingerprint"],
   http: ["request", "save"],
   scenario: ["request", "body", "userField", "historyField", "historyContentKey", "replyPath", "turns", "save"],
   conversation: ["request", "body", "userField", "historyField", "historyContentKey", "replyPath", "turns", "save", "rubric", "threshold", "votes", "scale", "reliability", "context", "judgeParams", "minScores"],

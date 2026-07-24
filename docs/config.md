@@ -157,6 +157,11 @@ output for free. A case with no cached output yet, or a `dispatch` fold that can
 text, falls back to a plain skip. The cache always stores a **passing** attempt's output, so under
 `passRate < 1` the replay verdict matches the live one.
 
+`exec` cases can join the same contract with a `fingerprint:` probe command — a wrapped harness
+builds its payload inside the child process where heyllm cannot see it, so the case declares a cheap
+command that prints those inputs and the hash of its output decides run-vs-skip. See
+[layers.md → exec](layers.md#exec--wrap-anything).
+
 When a case re-runs under `--changed-only` even though you did not edit it, heyllm says why:
 
 ```

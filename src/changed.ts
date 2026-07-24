@@ -159,6 +159,27 @@ export function fingerprintWith(base: string, extra: unknown): string {
   return shortHash(JSON.stringify(["with-v1", base, extra ?? null]));
 }
 
+/**
+ * Fingerprint an EXEC case from a cheap probe command's output.
+ *
+ * WHY: an exec-wrapped harness assembles its own model inputs INSIDE the child
+ * process (prompt built from code + DB), so heyllm never sees the payload and
+ * `--changed-only` cannot tell whether a prompt edit touched it — measured on a
+ * real project, the 40+ exec-wrapped LLM harnesses (the most expensive cases in
+ * the suite) re-ran on every changed-only run while the cheap llm-layer cases
+ * skipped correctly. The case declares `fingerprint: "<command>"` — a cheap
+ * command that PRINTS the harness's real resolved inputs (typically the same
+ * glue script that already supplies the prompt to other layers) — and the hash
+ * of that output stands in for the payload fingerprint.
+ *
+ * The main command is part of the hash: editing the harness invocation is
+ * changing what the case tests. `ignore` reuses the llm-layer semantics
+ * (declared-volatile regions are blanked from the hash only).
+ */
+export function fingerprintExec(command: string, probeOutput: string, ignore?: string[]): string {
+  return shortHash(JSON.stringify(["exec-v1", command, applyIgnore(probeOutput, ignore), ignore ?? null]));
+}
+
 export async function loadPromptStore(baseDir: string): Promise<PromptStore> {
   try {
     const parsed = JSON.parse(await readFile(path.join(baseDir, PROMPTS_RELPATH), "utf8"));

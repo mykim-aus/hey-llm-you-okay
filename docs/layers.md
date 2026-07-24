@@ -81,6 +81,30 @@ heyllm, no new layer to learn:
     expect: { json: { panelVisible: true, items: 3 } }
 ```
 
+**`fingerprint:` — let `--changed-only` see inside a wrapped harness.** An exec-wrapped LLM harness
+assembles its prompt *inside* the child process, so heyllm never sees the payload — without help,
+`--changed-only` must re-run it every time (measured on a real project: the 40+ wrapped harnesses,
+the most expensive cases in the suite, re-ran on every changed-only pass while the cheap llm-layer
+cases skipped correctly). Declare a cheap probe command that **prints the harness's real resolved
+inputs** — typically the same glue script that already feeds the prompt to other layers — and its
+output is hashed as the case's fingerprint:
+
+```yaml
+  - name: live-screen
+    command: "node scripts/_test-live-screen.mjs"          # expensive: real model calls
+    fingerprint: "node scripts/_print-live-prompt.mjs"     # cheap: prints the assembled prompt
+    fingerprintIgnore: ["^TS: .*$"]                        # same semantics as llm cases
+```
+
+Under `--changed-only`: probe unchanged since the last **passing** run → skip (a wrapped runner's
+output cannot be replayed like a cached LLM reply, so it skips rather than replays); probe moved →
+run live; probe **broken** → run live and say so (`fingerprint probe failed … ran the case anyway`)
+— a broken probe degrades to *always run*, never to *always skip*. `maxCacheAgeDays` applies as
+everywhere: an unchanged-but-stale record re-runs live to catch provider drift. On a normal run the
+probe is never executed. Keep the probe cheap and deterministic — it runs before every
+changed-only pass, and anything volatile it prints (timestamps, sampled words) belongs in
+`fingerprintIgnore`.
+
 ## `http` — integration with save-chaining
 
 ```yaml

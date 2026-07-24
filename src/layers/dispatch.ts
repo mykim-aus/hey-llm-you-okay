@@ -258,9 +258,26 @@ async function spawnReducer(spec: DispatchSpec, baseDir: string): Promise<Reduce
   return reduce;
 }
 
+/** Module reducers cached per resolved (file, export): a dispatch layer runs
+ *  many cases against ONE reducer, and re-importing (or re-reading for the
+ *  data-URL fallback) per case is waste — and when the module is broken, the
+ *  full multi-line load error was recomputed and printed once per case
+ *  (measured: 9 identical blocks for one broken import). The rejected promise
+ *  is cached too, so every case fails with the SAME error, computed once.
+ *  Subprocess reducers are NOT cached — each case owns its child's lifecycle. */
+const moduleReducerCache = new Map<string, Promise<Reducer>>();
+
 /** Load the JS module reducer or spawn the subprocess one — same shape out. */
 async function makeReducer(spec: DispatchSpec, baseDir: string): Promise<Reducer> {
-  return spec.command ? spawnReducer(spec, baseDir) : loadReducer(spec, baseDir);
+  if (spec.command) return spawnReducer(spec, baseDir);
+  const key = `${path.resolve(baseDir, spec.module as string)}#${spec.export ?? "default"}`;
+  let cached = moduleReducerCache.get(key);
+  if (!cached) {
+    cached = loadReducer(spec, baseDir);
+    cached.catch(() => {}); // cached rejection — handled at every await site, not here
+    moduleReducerCache.set(key, cached);
+  }
+  return cached;
 }
 
 /**
